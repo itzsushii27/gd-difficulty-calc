@@ -33,6 +33,13 @@ def calculate_score(s, g, a):
     return round(base + list_bonus - 2, 2)
 
 
+def score_parts(s, g, a):
+    """The two terms of calculate_score, for the breakdown display."""
+    base = 1.3 ** (g + s - 1)
+    list_bonus = (10 / 9) ** (149 - (a - 1) / 7) if a > 0 else 1.0
+    return base, list_bonus
+
+
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
@@ -252,8 +259,11 @@ def get_level_score(level_id):
         aredl_rank = fetch_aredl_rank(level_id)
 
     score = calculate_score(stars, gddl_tier, aredl_rank)
+    base, list_bonus = score_parts(stars, gddl_tier, aredl_rank)
 
     return jsonify({
+        "base": round(base, 2),
+        "list_bonus": round(list_bonus, 2),
         "name": lvl["name"],
         "author": lvl["author"],
         "id": level_id,
@@ -261,6 +271,19 @@ def get_level_score(level_id):
         "gddl_tier": round(gddl_tier, 2),
         "aredl_rank": aredl_rank,
         "score": score,
+    })
+
+
+@app.route("/api/calc")
+def calc():
+    s = min(max(to_int(request.args.get("s"), 1), 1), 10)
+    g = min(max(to_float(request.args.get("g"), 0.0), 0.0), 39.0)
+    a = min(max(to_int(request.args.get("a"), 0), 0), 1000)
+    base, list_bonus = score_parts(s, g, a)
+    return jsonify({
+        "score": calculate_score(s, g, a),
+        "base": round(base, 2),
+        "list_bonus": round(list_bonus, 2),
     })
 
 
@@ -274,189 +297,315 @@ HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GD Difficulty Calculator</title>
-    <style>
-        body { font-family: system-ui, -apple-system, sans-serif; background: #121212; color: #fff; display: flex; justify-content: center; padding: 40px 20px; margin: 0; }
-        .container { background: #1e1e1e; padding: 30px; border-radius: 12px; width: 100%; max-width: 500px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
-        .search-box { display: flex; gap: 10px; }
-        input, select { padding: 12px; border-radius: 8px; border: 1px solid #333; background: #2c2c2c; color: #fff; font-size: 15px; outline: none; }
-        input { flex: 1; min-width: 0; }
-        input:focus, select:focus { border-color: #4caf50; }
-        button { padding: 12px 18px; border-radius: 8px; border: none; background: #4caf50; color: #fff; font-weight: bold; cursor: pointer; font-size: 15px; }
-        button:hover { background: #43a047; }
-        .non-demon-bar { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 12px; background: #252525; border-radius: 8px; font-size: 0.9em; color: #ccc; }
-        .non-demon-bar select { padding: 8px 10px; font-size: 14px; }
-        .non-demon-bar button { padding: 8px 14px; font-size: 14px; background: #383838; margin-left: auto; }
-        .non-demon-bar button:hover { background: #484848; }
-        .section-title { font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px; color: #888; margin: 18px 0 8px 0; font-weight: bold; }
-        .results-list { display: flex; flex-direction: column; gap: 8px; }
-        .level-item { background: #282828; padding: 12px 15px; border-radius: 8px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; border: 1px solid transparent; transition: 0.15s; }
-        .level-item:hover { border-color: #4caf50; background: #303030; }
-        .level-item.exact { border-left: 3px solid #4caf50; }
-        .level-meta { font-size: 0.85em; color: #aaa; margin-top: 2px; }
-        .badge { background: #383838; padding: 4px 8px; border-radius: 6px; font-size: 0.85em; font-weight: bold; }
-        .score-card { margin-top: 25px; padding: 20px; background: #252525; border-radius: 10px; border-left: 4px solid #4caf50; display: none; }
-        .score-number { font-size: 2.4em; font-weight: 800; color: #4caf50; margin: 8px 0; word-break: break-all; }
-        .msg { padding: 12px 0; color: #aaa; }
-        .msg.err { color: #ff5252; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GD Difficulty Score</title>
+<style>
+:root { --bg:#0f1115; --panel:#181b22; --panel2:#20242d; --line:#2b303b; --text:#eef0f4; --muted:#9aa3b2; --accent:#4cd07d; --accent2:#f5a524; --danger:#ff5d5d; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,sans-serif; line-height:1.45; }
+.wrap { max-width:760px; margin:0 auto; padding:28px 18px 60px; }
+header h1 { margin:0; font-size:1.6rem; letter-spacing:-.3px; }
+header p { margin:4px 0 18px; color:var(--muted); font-size:.95rem; }
+nav { display:flex; gap:6px; border-bottom:1px solid var(--line); margin-bottom:20px; }
+nav button { background:none; color:var(--muted); border:none; border-bottom:2px solid transparent; padding:10px 14px; font-size:.95rem; font-weight:600; cursor:pointer; border-radius:0; }
+nav button:hover { color:var(--text); }
+nav button.active { color:var(--accent); border-bottom-color:var(--accent); }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; }
+input[type=text], input[type=number] { background:var(--panel2); border:1px solid var(--line); color:var(--text); border-radius:8px; padding:11px 12px; font-size:15px; outline:none; }
+input:focus { border-color:var(--accent); }
+button { background:var(--accent); color:#06150c; border:none; border-radius:8px; padding:11px 16px; font-weight:700; cursor:pointer; font-size:14px; }
+button:hover { filter:brightness(1.08); }
+button.ghost { background:var(--panel2); color:var(--text); border:1px solid var(--line); }
+button.small { padding:6px 10px; font-size:12.5px; }
+.row { display:flex; gap:10px; }
+.row input { flex:1; min-width:0; }
+.chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; align-items:center; font-size:.82rem; color:var(--muted); }
+.chip { background:var(--panel2); border:1px solid var(--line); color:var(--text); border-radius:999px; padding:3px 10px; cursor:pointer; font-size:.82rem; }
+.chip:hover { border-color:var(--accent); }
+.label { font-size:.75rem; text-transform:uppercase; letter-spacing:1px; color:var(--muted); font-weight:700; margin:18px 0 8px; }
+.level { background:var(--panel2); border:1px solid transparent; border-radius:10px; padding:11px 14px; display:flex; justify-content:space-between; align-items:center; cursor:pointer; margin-bottom:8px; gap:10px; }
+.level:hover { border-color:var(--accent); }
+.level.exact { border-left:3px solid var(--accent); }
+.meta { color:var(--muted); font-size:.85rem; }
+.badge { background:var(--line); border-radius:6px; padding:3px 8px; font-size:.82rem; font-weight:700; white-space:nowrap; }
+.msg { color:var(--muted); padding:10px 0; } .msg.err { color:var(--danger); }
+.score-title { font-size:1.15rem; font-weight:700; }
+.score-num { font-size:2.6rem; font-weight:800; color:var(--accent); margin:6px 0 2px; word-break:break-all; letter-spacing:-1px; }
+.stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin:14px 0; }
+.stat { background:var(--panel2); border-radius:8px; padding:10px; }
+.stat b { display:block; font-size:1.05rem; } .stat span { color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.5px; }
+.bar { display:flex; height:12px; border-radius:6px; overflow:hidden; background:var(--line); margin:8px 0 6px; }
+.bar i { display:block; height:100%; } .b1 { background:var(--accent); } .b2 { background:var(--accent2); }
+.legend { display:flex; gap:16px; flex-wrap:wrap; font-size:.82rem; color:var(--muted); }
+.dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; }
+.actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
+table { width:100%; border-collapse:collapse; font-size:.9rem; }
+th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+th { color:var(--muted); font-size:.74rem; text-transform:uppercase; letter-spacing:.8px; }
+td.num { text-align:right; font-variant-numeric:tabular-nums; } th.num { text-align:right; }
+.slider { margin:14px 0; }
+.slider .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-weight:600; }
+.slider input[type=range] { width:100%; accent-color:var(--accent); }
+.slider input[type=number] { width:90px; padding:6px 8px; }
+.formula { background:var(--panel2); border-radius:10px; padding:14px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.92rem; overflow-x:auto; line-height:1.8; }
+.formula .t1 { color:var(--accent); } .formula .t2 { color:var(--accent2); }
+h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px 0; }
+.hidden { display:none; }
+@media (max-width:520px) { .stats { grid-template-columns:1fr 1fr; } .score-num { font-size:2.1rem; } }
+</style>
 </head>
 <body>
-    <div class="container">
-        <h2 style="margin-top:0;">GD Difficulty Score</h2>
-        <div class="search-box">
-            <input type="text" id="searchInput" placeholder="Search level name or ID...">
-            <button id="searchBtn">Search</button>
-        </div>
+<div class="wrap">
+  <header>
+    <h1>GD Difficulty Score</h1>
+    <p>One number for how hard a Geometry Dash level is, built from stars, GDDL tier and AREDL rank.</p>
+  </header>
+  <nav>
+    <button class="active" data-tab="calc">Calculator</button>
+    <button data-tab="play">Playground</button>
+    <button data-tab="how">How it works</button>
+  </nav>
 
-        <div class="non-demon-bar">
-            <span>Quick non-demon calc:</span>
-            <select id="nonDemonStars">
-                <option value="1">1★ (Auto)</option>
-                <option value="2">2★ (Easy)</option>
-                <option value="3">3★ (Normal)</option>
-                <option value="4">4★ (Hard)</option>
-                <option value="5">5★ (Hard)</option>
-                <option value="6">6★ (Harder)</option>
-                <option value="7">7★ (Harder)</option>
-                <option value="8" selected>8★ (Insane)</option>
-                <option value="9">9★ (Insane)</option>
-            </select>
-            <button id="calcBtn">Calc Stars</button>
-        </div>
-
-        <div id="resultsArea"></div>
-        <div id="scoreCard" class="score-card"></div>
+  <!-- CALCULATOR -->
+  <section id="tab-calc">
+    <div class="card">
+      <div class="row">
+        <input type="text" id="searchInput" placeholder="Search a level name or ID…" autocomplete="off">
+        <button id="searchBtn">Search</button>
+      </div>
+      <div class="chips" id="recent"></div>
+      <div id="resultsArea"></div>
     </div>
+    <div id="scoreCard" class="card hidden"></div>
+    <div id="compareCard" class="card hidden">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div class="score-title">Compare</div>
+        <button class="ghost small" id="clearCompare">Clear all</button>
+      </div>
+      <table>
+        <thead><tr><th>#</th><th>Level</th><th class="num">Stars</th><th class="num">Tier</th><th class="num">AREDL</th><th class="num">Score</th><th></th></tr></thead>
+        <tbody id="compareBody"></tbody>
+      </table>
+    </div>
+  </section>
 
-    <script>
-        function el(tag, props, children) {
-            const e = document.createElement(tag);
-            if (props) {
-                for (const k in props) {
-                    if (k === 'class') e.className = props[k];
-                    else if (k === 'text') e.textContent = props[k];
-                    else if (k === 'style') e.setAttribute('style', props[k]);
-                    else e[k] = props[k];
-                }
-            }
-            (children || []).forEach(c => e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
-            return e;
-        }
+  <!-- PLAYGROUND -->
+  <section id="tab-play" class="hidden">
+    <div class="card">
+      <div class="score-title">Score playground</div>
+      <p class="meta">Move the sliders to see how each input changes the score. Same formula as the calculator.</p>
+      <div class="slider"><div class="top"><span>Stars</span><input type="number" id="pS" min="1" max="10" step="1" value="10"></div><input type="range" id="rS" min="1" max="10" step="1" value="10"></div>
+      <div class="slider"><div class="top"><span>GDDL tier</span><input type="number" id="pG" min="0" max="39" step="0.01" value="10"></div><input type="range" id="rG" min="0" max="39" step="0.01" value="10"></div>
+      <div class="slider"><div class="top"><span>AREDL rank <span class="meta">(0 = unranked)</span></span><input type="number" id="pA" min="0" max="500" step="1" value="0"></div><input type="range" id="rA" min="0" max="500" step="1" value="0"></div>
+      <div class="score-num" id="pScore">–</div>
+      <div id="pBreak"></div>
+    </div>
+  </section>
 
-        function message(text, isErr) {
-            return el('div', { class: 'msg' + (isErr ? ' err' : ''), text: text });
-        }
+  <!-- HOW IT WORKS -->
+  <section id="tab-how" class="hidden">
+    <div class="card">
+      <div class="score-title">The formula</div>
+      <div class="formula">
+        score = <span class="t1">1.3<sup>(tier + stars − 1)</sup></span> + <span class="t2">(10/9)<sup>(149 − (rank − 1) / 7)</sup></span> − 2
+      </div>
+      <h3><span class="dot b1" style="background:var(--accent)"></span>Base term</h3>
+      <p>Stars and GDDL tier are added together inside one exponent, so each extra star <em>or</em> tier multiplies the base term by 1.3. A 10★ demon starts at 1.3<sup>9</sup> ≈ 10.6 before its tier is even counted, and every tier above 0 multiplies that again.</p>
+      <h3><span class="dot b2" style="background:var(--accent2)"></span>List term</h3>
+      <p>If the level is on the AREDL (the Extreme Demon List), its position feeds a second exponential. Rank #1 gives (10/9)<sup>149</sup> ≈ 6.5 million, and every 7 places down divides the term by 10/9. Unranked levels use a fixed 1.0.</p>
+      <h3>The −2 offset</h3>
+      <p>Subtracting 2 removes the two baseline "1" values, so a non-demon with no tier and no rank scores 1.3<sup>(stars−1)</sup> − 1.</p>
+      <h3>Where the data comes from</h3>
+      <ul>
+        <li><b>Stars:</b> the Geometry Dash servers, via GDBrowser.</li>
+        <li><b>Tier:</b> community-voted GDDL rating (0 if the level isn't on GDDL). Only 10★ demons look it up.</li>
+        <li><b>Rank:</b> current AREDL position (0 if unranked). Only 10★ demons look it up.</li>
+      </ul>
+      <h3>What the list term looks like</h3>
+      <table><thead><tr><th>AREDL rank</th><th class="num">List term</th></tr></thead><tbody id="rankTable"><tr><td colspan="2" class="meta">Loading…</td></tr></tbody></table>
+      <div class="actions"><button class="ghost" id="toPlay">Try it in the playground</button></div>
+    </div>
+  </section>
+</div>
 
-        function setArea(node) {
-            const area = document.getElementById('resultsArea');
-            area.replaceChildren(node);
-        }
+<script>
+function el(tag, props, kids) {
+  const e = document.createElement(tag);
+  for (const k in (props || {})) {
+    if (k === 'class') e.className = props[k];
+    else if (k === 'text') e.textContent = props[k];
+    else e[k] = props[k];
+  }
+  (kids || []).forEach(c => e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+  return e;
+}
+const $ = id => document.getElementById(id);
+const fmt = n => Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+function load(key) { try { return JSON.parse(localStorage.getItem(key)) || []; } catch (e) { return []; } }
+function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {} }
 
-        function levelCard(lvl, isExact) {
-            const item = el('div', { class: 'level-item' + (isExact ? ' exact' : '') }, [
-                el('div', null, [
-                    el('div', { style: 'font-weight:bold;', text: lvl.name }),
-                    el('div', { class: 'level-meta', text: 'by ' + lvl.author + ' • ID: ' + lvl.id })
-                ]),
-                el('div', { class: 'badge', text: lvl.stars + '★' })
-            ]);
-            item.addEventListener('click', () => selectLevel(lvl.id));
-            return item;
-        }
+/* ---------- tabs ---------- */
+function showTab(name) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  ['calc', 'play', 'how'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+  if (name === 'how') loadRankTable();
+  if (name === 'play') runPlay();
+}
+document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+$('toPlay').addEventListener('click', () => showTab('play'));
 
-        function section(title, levels, isExact) {
-            const frag = document.createDocumentFragment();
-            frag.appendChild(el('div', { class: 'section-title', text: title }));
-            frag.appendChild(el('div', { class: 'results-list' }, levels.map(l => levelCard(l, isExact))));
-            return frag;
-        }
+/* ---------- breakdown widget ---------- */
+function breakdown(base, listBonus) {
+  const total = base + listBonus;
+  const p1 = total > 0 ? (base / total) * 100 : 50;
+  return el('div', null, [
+    el('div', { class: 'bar' }, [
+      el('i', { class: 'b1', style: 'width:' + p1 + '%' }),
+      el('i', { class: 'b2', style: 'width:' + (100 - p1) + '%' })
+    ]),
+    el('div', { class: 'legend' }, [
+      el('span', null, [el('span', { class: 'dot b1' }), 'Base ' + fmt(base) + ' (' + p1.toFixed(1) + '%)']),
+      el('span', null, [el('span', { class: 'dot b2' }), 'List ' + fmt(listBonus) + ' (' + (100 - p1).toFixed(1) + '%)']),
+      el('span', { text: 'Offset −2' })
+    ])
+  ]);
+}
 
-        function showCard(nodes) {
-            const card = document.getElementById('scoreCard');
-            card.style.display = 'block';
-            card.replaceChildren(...nodes);
-        }
+/* ---------- recent searches ---------- */
+function renderRecent() {
+  const box = $('recent'); box.replaceChildren();
+  const r = load('gdRecent');
+  if (!r.length) return;
+  box.appendChild(document.createTextNode('Recent:'));
+  r.forEach(q => {
+    const c = el('span', { class: 'chip', text: q });
+    c.addEventListener('click', () => { $('searchInput').value = q; searchLevels(); });
+    box.appendChild(c);
+  });
+}
+function pushRecent(q) {
+  const r = load('gdRecent').filter(x => x.toLowerCase() !== q.toLowerCase());
+  r.unshift(q); save('gdRecent', r.slice(0, 6)); renderRecent();
+}
 
-        function metaLine(parts) {
-            const line = el('div', { class: 'level-meta' });
-            parts.forEach((p, i) => {
-                if (i > 0) line.appendChild(document.createTextNode('  |  '));
-                line.appendChild(document.createTextNode(p[0] + ': '));
-                line.appendChild(el('strong', { text: p[1] }));
-            });
-            return line;
-        }
+/* ---------- search ---------- */
+function setArea(node) { $('resultsArea').replaceChildren(node); }
+function msg(text, err) { return el('div', { class: 'msg' + (err ? ' err' : ''), text }); }
+function levelRow(l, exact) {
+  const row = el('div', { class: 'level' + (exact ? ' exact' : '') }, [
+    el('div', null, [el('div', { text: l.name, style: 'font-weight:700' }), el('div', { class: 'meta', text: 'by ' + l.author + ' • ID ' + l.id })]),
+    el('div', { class: 'badge', text: l.stars + '★' })
+  ]);
+  row.addEventListener('click', () => selectLevel(l.id));
+  return row;
+}
+function group(title, list, exact) {
+  const f = document.createDocumentFragment();
+  f.appendChild(el('div', { class: 'label', text: title }));
+  list.forEach(l => f.appendChild(levelRow(l, exact)));
+  return f;
+}
+async function searchLevels() {
+  const q = $('searchInput').value.trim();
+  if (!q) return;
+  $('scoreCard').classList.add('hidden');
+  setArea(msg('Searching…'));
+  try {
+    const d = await (await fetch('/api/search?q=' + encodeURIComponent(q))).json();
+    if (!d.exact.length && !d.contains.length) { setArea(msg('No rated levels found for "' + q + '".', true)); return; }
+    pushRecent(q);
+    const f = document.createDocumentFragment();
+    if (d.exact.length) f.appendChild(group('Exact matches', d.exact, true));
+    if (d.contains.length) f.appendChild(group('Containing "' + q + '"', d.contains, false));
+    setArea(f);
+  } catch (e) { setArea(msg('Could not reach the server.', true)); }
+}
 
-        function calcNonDemon() {
-            const s = parseInt(document.getElementById('nonDemonStars').value, 10);
-            const score = Math.round((Math.pow(1.3, s - 1) - 1) * 100) / 100;
-            showCard([
-                el('div', { style: 'font-size:1.2em; font-weight:bold;', text: 'Non-Demon (' + s + '★)' }),
-                el('div', { class: 'score-number', text: score.toLocaleString() }),
-                metaLine([['Stars', s + '★'], ['GDDL Tier', '0'], ['AREDL', 'N/A']])
-            ]);
-        }
+/* ---------- score card ---------- */
+function showCard(nodes) { const c = $('scoreCard'); c.classList.remove('hidden'); c.replaceChildren(...nodes); }
+async function selectLevel(id) {
+  showCard([msg('Calculating…')]);
+  try {
+    const d = await (await fetch('/api/score/' + id)).json();
+    if (d.error) { showCard([msg(d.error, true)]); return; }
+    const stat = (label, val) => el('div', { class: 'stat' }, [el('b', { text: val }), el('span', { text: label })]);
+    const add = el('button', { text: 'Add to compare' });
+    add.addEventListener('click', () => addCompare(d));
+    const play = el('button', { class: 'ghost', text: 'Open in playground' });
+    play.addEventListener('click', () => { setPlay(d.stars, d.gddl_tier, d.aredl_rank); showTab('play'); });
+    const copy = el('button', { class: 'ghost', text: 'Copy score' });
+    copy.addEventListener('click', () => { navigator.clipboard && navigator.clipboard.writeText(String(d.score)); copy.textContent = 'Copied!'; setTimeout(() => copy.textContent = 'Copy score', 1200); });
+    showCard([
+      el('div', { class: 'score-title' }, [d.name + ' ', el('span', { class: 'meta', text: 'by ' + d.author + ' • ID ' + d.id })]),
+      el('div', { class: 'score-num', text: fmt(d.score) }),
+      el('div', { class: 'stats' }, [stat('Stars', d.stars + '★'), stat('GDDL tier', d.gddl_tier || 'N/A'), stat('AREDL rank', d.aredl_rank ? '#' + d.aredl_rank : 'Unranked')]),
+      breakdown(d.base, d.list_bonus),
+      el('div', { class: 'actions' }, [add, play, copy])
+    ]);
+  } catch (e) { showCard([msg('Failed to calculate score.', true)]); }
+}
 
-        async function searchLevels() {
-            const query = document.getElementById('searchInput').value.trim();
-            if (!query) return;
+/* ---------- compare ---------- */
+function addCompare(d) {
+  const list = load('gdCompare').filter(x => x.id !== d.id);
+  list.push({ id: d.id, name: d.name, stars: d.stars, tier: d.gddl_tier, rank: d.aredl_rank, score: d.score });
+  save('gdCompare', list); renderCompare();
+}
+function renderCompare() {
+  const list = load('gdCompare').sort((a, b) => b.score - a.score);
+  $('compareCard').classList.toggle('hidden', !list.length);
+  const body = $('compareBody'); body.replaceChildren();
+  list.forEach((x, i) => {
+    const rm = el('button', { class: 'ghost small', text: '✕' });
+    rm.addEventListener('click', () => { save('gdCompare', load('gdCompare').filter(y => y.id !== x.id)); renderCompare(); });
+    body.appendChild(el('tr', null, [
+      el('td', { text: i + 1 }), el('td', { text: x.name }),
+      el('td', { class: 'num', text: x.stars + '★' }), el('td', { class: 'num', text: x.tier || '–' }),
+      el('td', { class: 'num', text: x.rank ? '#' + x.rank : '–' }), el('td', { class: 'num', text: fmt(x.score) }),
+      el('td', null, [rm])
+    ]));
+  });
+}
+$('clearCompare').addEventListener('click', () => { save('gdCompare', []); renderCompare(); });
 
-            document.getElementById('scoreCard').style.display = 'none';
-            setArea(message('Searching...', false));
+/* ---------- playground ---------- */
+const pairs = [['pS', 'rS'], ['pG', 'rG'], ['pA', 'rA']];
+function setPlay(s, g, a) { $('pS').value = $('rS').value = s; $('pG').value = $('rG').value = g; $('pA').value = $('rA').value = a; }
+let playTimer = null;
+function runPlay() {
+  clearTimeout(playTimer);
+  playTimer = setTimeout(async () => {
+    try {
+      const q = 's=' + $('pS').value + '&g=' + $('pG').value + '&a=' + $('pA').value;
+      const d = await (await fetch('/api/calc?' + q)).json();
+      $('pScore').textContent = fmt(d.score);
+      $('pBreak').replaceChildren(breakdown(d.base, d.list_bonus));
+    } catch (e) { $('pScore').textContent = '–'; }
+  }, 100);
+}
+pairs.forEach(([n, r]) => {
+  $(n).addEventListener('input', () => { $(r).value = $(n).value; runPlay(); });
+  $(r).addEventListener('input', () => { $(n).value = $(r).value; runPlay(); });
+});
 
-            try {
-                const res = await fetch('/api/search?q=' + encodeURIComponent(query));
-                const data = await res.json();
+/* ---------- rank table ---------- */
+let rankLoaded = false;
+async function loadRankTable() {
+  if (rankLoaded) return;
+  const ranks = [1, 5, 10, 25, 50, 100, 150, 200, 300];
+  try {
+    const res = await Promise.all(ranks.map(r => fetch('/api/calc?s=1&g=0&a=' + r).then(x => x.json())));
+    const body = $('rankTable'); body.replaceChildren();
+    ranks.forEach((r, i) => body.appendChild(el('tr', null, [el('td', { text: '#' + r }), el('td', { class: 'num', text: fmt(res[i].list_bonus) })])));
+    rankLoaded = true;
+  } catch (e) {}
+}
 
-                if (!data.exact.length && !data.contains.length) {
-                    setArea(message('No rated levels found matching "' + query + '".', true));
-                    return;
-                }
-
-                const frag = document.createDocumentFragment();
-                if (data.exact.length) frag.appendChild(section('Exact Matches', data.exact, true));
-                if (data.contains.length) frag.appendChild(section('Containing "' + query + '"', data.contains, false));
-                setArea(frag);
-            } catch (err) {
-                setArea(message('Error connecting to server.', true));
-            }
-        }
-
-        async function selectLevel(id) {
-            showCard([el('div', { style: 'color:#aaa;', text: 'Calculating score...' })]);
-            try {
-                const res = await fetch('/api/score/' + id);
-                const data = await res.json();
-
-                if (data.error) {
-                    showCard([el('div', { style: 'color:#ff5252;', text: data.error })]);
-                    return;
-                }
-
-                showCard([
-                    el('div', { style: 'font-size:1.2em; font-weight:bold;' }, [
-                        data.name + ' ',
-                        el('span', { style: 'font-weight:normal; color:#aaa; font-size:0.85em;', text: 'by ' + data.author })
-                    ]),
-                    el('div', { class: 'score-number', text: data.score.toLocaleString() }),
-                    metaLine([
-                        ['Stars', data.stars + '★'],
-                        ['GDDL Tier', data.gddl_tier || 'N/A'],
-                        ['AREDL Rank', data.aredl_rank ? '#' + data.aredl_rank : 'Unranked']
-                    ])
-                ]);
-            } catch (err) {
-                showCard([el('div', { style: 'color:#ff5252;', text: 'Failed to calculate score.' })]);
-            }
-        }
-
-        document.getElementById('searchBtn').addEventListener('click', searchLevels);
-        document.getElementById('calcBtn').addEventListener('click', calcNonDemon);
-        document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') searchLevels(); });
-    </script>
+$('searchBtn').addEventListener('click', searchLevels);
+$('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') searchLevels(); });
+renderRecent(); renderCompare();
+</script>
 </body>
 </html>
 """
