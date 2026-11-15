@@ -134,32 +134,41 @@ def gddl_candidates(level_id):
 
 
 def fetch_gddl_tier(level_id, debug=None):
+    """Tier as float; 0.0 = GDDL answered but the level has no tier; None = lookup failed."""
     headers = {}
     if GDDL_API_KEY:
         headers["Authorization"] = f"Bearer {GDDL_API_KEY}"
-    for kind, url in gddl_candidates(level_id):
-        try:
-            r = http.get(url, headers=headers, timeout=TIMEOUT)
-        except requests.RequestException as e:
+    for attempt in range(2):
+        loaded = False
+        for kind, url in gddl_candidates(level_id):
+            try:
+                r = http.get(url, headers=headers, timeout=TIMEOUT)
+            except requests.RequestException as e:
+                if debug is not None:
+                    debug.append({"url": url, "error": str(e)})
+                continue
+            tier = None
+            if r.status_code == 200:
+                if kind == "json":
+                    try:
+                        data = r.json()
+                        loaded = loaded or isinstance(data, dict)
+                        tier = _tier_from_json(data)
+                    except ValueError:
+                        tier = None
+                else:
+                    loaded = True
+                    tier = _tier_from_html(r.text)
             if debug is not None:
-                debug.append({"url": url, "error": str(e)})
-            continue
-        tier = None
-        if r.status_code == 200:
-            if kind == "json":
-                try:
-                    tier = _tier_from_json(r.json())
-                except ValueError:
-                    tier = None
-            else:
-                tier = _tier_from_html(r.text)
-        if debug is not None:
-            debug.append({"url": url, "status": r.status_code,
-                          "content_type": r.headers.get("content-type"),
-                          "tier": tier, "preview": r.text[:200]})
-        if tier is not None:
-            return tier
-    return 0.0
+                debug.append({"url": url, "status": r.status_code,
+                              "content_type": r.headers.get("content-type"),
+                              "tier": tier, "preview": r.text[:200]})
+            if tier is not None:
+                return tier
+        if loaded:
+            return 0.0
+        time.sleep(0.7)  # likely rate-limited or a hiccup: wait and retry once
+    return None
 
 
 @app.route("/api/debug/gddl/<int:level_id>")
@@ -354,10 +363,14 @@ def get_level_score(level_id):
 
     stars = lvl["stars"]
     gddl_tier = 0.0
+    gddl_failed = False
     aredl_rank = 0
 
     if stars == 10:  # demons only
         gddl_tier = fetch_gddl_tier(level_id)
+        gddl_failed = gddl_tier is None
+        if gddl_failed:
+            gddl_tier = 0.0
         aredl_rank = fetch_aredl_rank(level_id)
 
     score = calculate_score(stars, gddl_tier, aredl_rank)
@@ -371,6 +384,7 @@ def get_level_score(level_id):
         "id": level_id,
         "stars": stars,
         "gddl_tier": round(gddl_tier, 2),
+        "gddl_failed": gddl_failed,
         "aredl_rank": aredl_rank,
         "score": score,
     })
@@ -414,9 +428,9 @@ def avg_curve():
     todo = [lid for _, lid in wanted if lid not in _tiers]
     batch = todo[:AVG_BATCH]
     if batch:
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        with ThreadPoolExecutor(max_workers=4) as ex:
             for lid, t in zip(batch, ex.map(fetch_gddl_tier, batch)):
-                _tiers[lid] = t
+                _tiers[lid] = t or 0.0
         _save_tier_cache()
     return jsonify({
         "points": build_avg_curve(),
@@ -699,7 +713,7 @@ async function selectLevel(id) {
     showCard([
       el('div', { class: 'score-title' }, [d.name + ' ', el('span', { class: 'meta', text: 'by ' + d.author + ' • ID ' + d.id })]),
       el('div', { class: 'score-num', text: fmt(d.score) }),
-      el('div', { class: 'stats' }, [stat('Stars', d.stars + '★'), stat('GDDL tier', d.gddl_tier || 'N/A'), stat('AREDL rank', d.aredl_rank ? '#' + d.aredl_rank : 'Unranked')]),
+      el('div', { class: 'stats' }, [stat('Stars', d.stars + '★'), stat('GDDL tier', d.gddl_failed ? 'Lookup failed' : (d.gddl_tier || 'N/A')), stat('AREDL rank', d.aredl_rank ? '#' + d.aredl_rank : 'Unranked')]),
       breakdown(d.base, d.list_bonus),
       el('div', { class: 'actions' }, [add, play, copy])
     ]);
@@ -764,7 +778,8 @@ function renderVerdict() {
     ]),
     el('div', { class: 'label', text: 'Scores on a log scale' }),
     bar(a, 'b1'), bar(b, 'b2'),
-    el('p', { class: 'meta', text: driver })
+    el('p', { class: 'meta', text: driver }),
+    ...[a, b].filter(d => d.gddl_failed || !d.gddl_tier).map(d => el('p', { class: 'msg err', text: d.name + ': ' + (d.gddl_failed ? 'the GDDL lookup failed, so its score is missing the tier term. Search it again in a moment.' : 'no GDDL tier found, so it is not plotted on the graph.') }))
   ]));
 }
 $('cbA').addEventListener('click', () => cmpSearch('A'));
@@ -825,8 +840,8 @@ function fallbackCurve() {
 let avgPts = null, avgTimer = null;
 function drawCmpChart() {
   const marks = [];
-  if (cmp.A) marks.push({ x: cmp.A.gddl_tier, y: cmp.A.score, label: 'A', color: '#ffffff' });
-  if (cmp.B) marks.push({ x: cmp.B.gddl_tier, y: cmp.B.score, label: 'B', color: '#7cc7ff' });
+  if (cmp.A && cmp.A.gddl_tier > 0) marks.push({ x: cmp.A.gddl_tier, y: cmp.A.score, label: 'A', color: '#ffffff' });
+  if (cmp.B && cmp.B.gddl_tier > 0) marks.push({ x: cmp.B.gddl_tier, y: cmp.B.score, label: 'B', color: '#7cc7ff' });
   logChart($('cmpChart'), avgPts || fallbackCurve(), 'GDDL tier', marks, [0, 5, 10, 15, 20, 25, 30, 35, 39]);
 }
 async function refreshAvg() {
