@@ -11,11 +11,11 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 
 # ----------------------------------------------------------------------------
-# Config. If a data source changes its URL, change it here (or via env vars).
+# Config
 # ----------------------------------------------------------------------------
 GDBROWSER_BASE = os.environ.get("GDBROWSER_BASE", "https://gdbrowser.com/api")
 GDDL_BASE = os.environ.get("GDDL_BASE", "https://gdladder.com/api")
-GDDL_API_KEY = os.environ.get("GDDL_API_KEY", "")  # only needed if GDDL requires it
+GDDL_API_KEY = os.environ.get("GDDL_API_KEY", "")
 AREDL_LIST_URL = os.environ.get("AREDL_LIST_URL", "https://api.aredl.net/v2/api/aredl/levels")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (GD Difficulty Calculator)", "Accept": "application/json"}
@@ -36,7 +36,6 @@ def calculate_score(s, g, a):
 
 
 def score_parts(s, g, a):
-    """The two terms of calculate_score, for the breakdown display."""
     base = 1.3 ** (g + s - 1)
     list_bonus = (10 / 9) ** (149 - (a - 1) / 7) if a > 0 else 1.0
     return base, list_bonus
@@ -46,7 +45,6 @@ def score_parts(s, g, a):
 # Helpers
 # ----------------------------------------------------------------------------
 def get_json(url, **kwargs):
-    """GET a URL and return parsed JSON, or None on any failure."""
     try:
         r = http.get(url, timeout=TIMEOUT, **kwargs)
         if r.status_code != 200:
@@ -86,7 +84,6 @@ def normalize_gdbrowser_level(item):
 
 
 def fetch_level(level_id):
-    """Official level info (name, author, stars) via GDBrowser."""
     data = get_json(f"{GDBROWSER_BASE}/level/{level_id}")
     return normalize_gdbrowser_level(data)
 
@@ -109,7 +106,6 @@ def _tier_from_json(data):
 
 
 def _tier_from_html(html):
-    """Parse the public level page, e.g. 'Tier 5 (4.67)' or meta 'Tier 5 · Enjoyment 7.3'."""
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text)
@@ -132,7 +128,6 @@ def gddl_candidates(level_id):
 
 
 def fetch_gddl_tier(level_id, debug=None):
-    """Tier as float; 0.0 = GDDL answered but the level has no tier; None = lookup failed."""
     headers = {}
     if GDDL_API_KEY:
         headers["Authorization"] = f"Bearer {GDDL_API_KEY}"
@@ -169,14 +164,7 @@ def fetch_gddl_tier(level_id, debug=None):
     return None
 
 
-@app.route("/api/debug/gddl/<int:level_id>")
-def debug_gddl(level_id):
-    attempts = []
-    tier = fetch_gddl_tier(level_id, attempts)
-    return jsonify({"tier": tier, "attempts": attempts})
-
-
-# --- AREDL position (full list cached, indexed by in-game level id) -----------
+# --- AREDL position --------------------------------------------------------
 _aredl_lock = threading.Lock()
 _aredl_cache = {"ts": 0.0, "by_id": {}}
 AREDL_TTL = 3600
@@ -387,6 +375,9 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
 .logbar { height:14px; border-radius:7px; background:var(--line); margin:4px 0 12px; overflow:hidden; } .logbar i { display:block; height:100%; }
 .chartbox svg { width:100%; height:auto; display:block; }
 .chart-cap { color:var(--muted); font-size:.82rem; margin:6px 0 0; }
+.scale-toggle { display:flex; gap:4px; background:var(--panel2); padding:3px; border-radius:8px; border:1px solid var(--line); }
+.scale-toggle button { background:none; color:var(--muted); padding:4px 10px; font-size:12px; border-radius:6px; }
+.scale-toggle button.active { background:var(--accent); color:#06150c; font-weight:700; }
 .hidden { display:none; }
 @media (max-width:520px) { .cmpgrid { grid-template-columns:1fr; } .stats { grid-template-columns:1fr 1fr; } .score-num { font-size:2.1rem; } }
 </style>
@@ -404,6 +395,29 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
     <button data-tab="how">How it works</button>
   </nav>
 
+  <!-- COMPARE -->
+  <section id="tab-cmp">
+    <div class="card">
+      <div class="score-title">Compare levels</div>
+      <p class="meta">Add as many levels as you want. They're ranked by score and plotted on the graph below.</p>
+      <div class="row" style="margin-top:12px"><input type="text" id="cq" placeholder="Name or ID…" autocomplete="off"><button id="cb">Search</button></div>
+      <div id="cr"></div>
+    </div>
+    <div id="cmpResult"></div>
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+        <div class="score-title">Score vs GDDL tier</div>
+        <div class="scale-toggle">
+          <button id="btnLog" class="active" onclick="setScale('log')">Log scale</button>
+          <button id="btnLin" onclick="setScale('linear')">Linear scale</button>
+        </div>
+      </div>
+      <div class="chartbox" id="cmpChart" style="margin-top:12px"></div>
+      <div class="legend" id="cmpLegend" style="margin-top:8px"></div>
+      <p class="chart-cap">The curve shows the theoretical score trajectory across GDDL tiers (including expected AREDL list scaling above tier 24). The dots mark the levels you're comparing.</p>
+    </div>
+  </section>
+
   <!-- CALCULATOR -->
   <section id="tab-calc" class="hidden">
     <div class="card">
@@ -415,23 +429,6 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
       <div id="resultsArea"></div>
     </div>
     <div id="scoreCard" class="card hidden"></div>
-  </section>
-
-  <!-- COMPARE -->
-  <section id="tab-cmp">
-    <div class="card">
-      <div class="score-title">Compare levels</div>
-      <p class="meta">Add as many levels as you want. They're ranked by score and plotted on the graph below.</p>
-      <div class="row" style="margin-top:12px"><input type="text" id="cq" placeholder="Name or ID…" autocomplete="off"><button id="cb">Search</button></div>
-      <div id="cr"></div>
-    </div>
-    <div id="cmpResult"></div>
-    <div class="card">
-      <div class="score-title">Score vs GDDL tier <span class="meta">(log scale)</span></div>
-      <div class="chartbox" id="cmpChart"></div>
-      <div class="legend" id="cmpLegend" style="margin-top:8px"></div>
-      <p class="chart-cap">The curve shows the theoretical score trajectory across GDDL tiers (including expected AREDL list scaling above tier 20). The dots mark the levels you're comparing.</p>
-    </div>
   </section>
 
   <!-- PLAYGROUND -->
@@ -645,7 +642,7 @@ function renderCompare() {
       el('td', { class: 'num', text: x.aredl_rank ? '#' + x.aredl_rank : '–' }),
       el('td', { class: 'num', text: fmt(x.score) }),
       el('td', { class: 'num', text: i === 0 ? '–' : '−' + fmt(top.score - x.score) }),
-      el('td', { class: 'num', text: i === 0 || x.score <= 0 ? '–' : '×' + fmt(top.score / x.score) + ' lower' }),
+      el('td', { class: 'num', text: i === 0 || x.score <= 0 ? '–' : fmt(top.score / x.score) + '× lower' }),
       el('td', null, [rm])
     ]));
   });
@@ -663,7 +660,15 @@ function renderCompare() {
 $('cb').addEventListener('click', cmpSearch);
 $('cq').addEventListener('keydown', e => { if (e.key === 'Enter') cmpSearch(); });
 
-/* ---------- log chart: pure function curve vs GDDL tier ---------- */
+/* ---------- chart: log/linear toggle ---------- */
+let currentScale = 'log';
+function setScale(scale) {
+  currentScale = scale;
+  $('btnLog').classList.toggle('active', scale === 'log');
+  $('btnLin').classList.toggle('active', scale === 'linear');
+  drawCmpChart();
+}
+
 const BANDS = [
   { name: 'Easy', max: 5, color: '#4cd07d' },
   { name: 'Medium', max: 10, color: '#f5d524' },
@@ -673,12 +678,26 @@ const BANDS = [
 ];
 function svgEl(tag, attrs) { const e = document.createElementNS('http://www.w3.org/2000/svg', tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
 function svgText(attrs, text) { const t = svgEl('text', attrs); t.textContent = text; return t; }
-const Y_LABELS = ['1', '10', '100', '1000', '10K', '100K', '1M', '10M'];
-function logChart(box, pts, xLabel, marks, xTicks) {
-  const W = 640, H = 300, L = 54, R = 16, T = 16, B = 40, LO = 0, HI = 7;
+
+const Y_LABELS_LOG = ['1', '10', '100', '1000', '10K', '100K', '1M', '10M'];
+
+function renderChart(box, pts, xLabel, marks, xTicks, scale) {
+  const W = 640, H = 300, L = 58, R = 16, T = 16, B = 40;
   const x0 = pts[0].x, x1 = pts[pts.length - 1].x;
   const px = x => L + (x - x0) / ((x1 - x0) || 1) * (W - L - R);
-  const py = y => T + (1 - (Math.log10(Math.min(Math.max(y, 1), 1e7)) - LO) / (HI - LO)) * (H - T - B);
+
+  let py, yTicks = [];
+  if (scale === 'log') {
+    const LO = 0, HI = 7;
+    py = y => T + (1 - (Math.log10(Math.min(Math.max(y, 1), 1e7)) - LO) / (HI - LO)) * (H - T - B);
+    yTicks = Y_LABELS_LOG.map((lbl, k) => ({ yVal: Math.pow(10, k), label: lbl }));
+  } else {
+    // Linear scale max based on top pt or marks
+    const maxY = Math.max(5000000, ...pts.map(p => p.y), ...marks.map(m => m.y));
+    py = y => T + (1 - Math.min(Math.max(y, 0), maxY) / maxY) * (H - T - B);
+    yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => ({ yVal: maxY * f, label: maxY * f >= 1e6 ? (maxY * f / 1e6).toFixed(1) + 'M' : Math.round(maxY * f).toLocaleString() }));
+  }
+
   const s = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img' });
   const defs = svgEl('defs', {}), grad = svgEl('linearGradient', { id: 'tierGrad', gradientUnits: 'userSpaceOnUse', x1: px(x0), x2: px(x1), y1: 0, y2: 0 });
   const stop = (o, c) => grad.appendChild(svgEl('stop', { offset: Math.min(Math.max(o, 0), 1), 'stop-color': c }));
@@ -687,36 +706,48 @@ function logChart(box, pts, xLabel, marks, xTicks) {
   BANDS.forEach(b => { stop(((from + b.max) / 2 - x0) / (x1 - x0), b.color); from = b.max + 1; });
   stop(1, BANDS[BANDS.length - 1].color);
   defs.appendChild(grad); s.appendChild(defs);
-  for (let k = LO; k <= HI; k++) {
-    const y = py(Math.pow(10, k));
+
+  yTicks.forEach(yt => {
+    const y = py(yt.yVal);
     s.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: 'var(--line)' }));
-    s.appendChild(svgText({ x: L - 8, y: y + 4, 'text-anchor': 'end', fill: 'var(--muted)', 'font-size': 11 }, Y_LABELS[k]));
-  }
+    s.appendChild(svgText({ x: L - 8, y: y + 4, 'text-anchor': 'end', fill: 'var(--muted)', 'font-size': 11 }, yt.label));
+  });
+
   xTicks.forEach(xv => {
     const x = px(xv);
     s.appendChild(svgEl('line', { x1: x, x2: x, y1: H - B, y2: H - B + 4, stroke: 'var(--muted)' }));
     s.appendChild(svgText({ x: x, y: H - B + 17, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 11 }, xv));
   });
+
   s.appendChild(svgText({ x: (L + W - R) / 2, y: H - 6, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 12 }, xLabel));
   s.appendChild(svgEl('polyline', { points: pts.map(p => px(p.x).toFixed(1) + ',' + py(p.y).toFixed(1)).join(' '), fill: 'none', stroke: 'url(#tierGrad)', 'stroke-width': 1.75, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-  marks.forEach((m, i) => {
-    const cx = px(m.x), cy = py(m.y), right = cx > W - 140;
-    s.appendChild(svgEl('circle', { cx: cx, cy: cy, r: 5, fill: m.color, stroke: '#0f1115', 'stroke-width': 2 }));
-    s.appendChild(svgText({ x: cx + (right ? -10 : 10), y: cy + (i ? 18 : -9), 'text-anchor': right ? 'end' : 'start', fill: m.color, 'font-size': 12, 'font-weight': 700 }, m.label + ': ' + fmt(m.y)));
+
+  const sortedMarks = marks.map(m => ({ ...m, cx: px(m.x), cy: py(m.y) })).sort((a, b) => a.cy - b.cy);
+  for (let i = 0; i < sortedMarks.length; i++) {
+    let curr = sortedMarks[i];
+    let yOff = -9;
+    if (i > 0 && Math.abs(curr.cy - sortedMarks[i - 1].cy) < 18) {
+      yOff = sortedMarks[i - 1].yOff > 0 ? -22 : 18;
+    }
+    curr.yOff = yOff;
+  }
+
+  sortedMarks.forEach(m => {
+    const right = m.cx > W - 140;
+    s.appendChild(svgEl('circle', { cx: m.cx, cy: m.cy, r: 5, fill: m.color, stroke: '#0f1115', 'stroke-width': 2 }));
+    s.appendChild(svgText({ x: m.cx + (right ? -10 : 10), y: m.cy + m.yOff, 'text-anchor': right ? 'end' : 'start', fill: m.color, 'font-size': 12, 'font-weight': 700 }, m.label + ': ' + fmt(m.y)));
   });
   box.replaceChildren(s);
 }
 
-// Pure mathematical curve: unranked 10* score for tiers 0..20,
-// smoothly transitioning to expected AREDL list rank scaling for tiers 20..39.
 function functionCurve() {
   const pts = [];
   for (let i = 0; i <= 78; i++) {
     const g = i / 2;
     const base = Math.pow(1.3, g + 9);
     let listBonus = 1.0;
-    if (g > 20) {
-      const estRank = Math.pow(1000, (39 - g) / 19);
+    if (g > 24) {
+      const estRank = Math.pow(1000, (39 - g) / 15);
       listBonus = Math.pow(10 / 9, 149 - (estRank - 1) / 7);
     }
     pts.push({ x: g, y: base + listBonus - 2 });
@@ -726,7 +757,7 @@ function functionCurve() {
 
 function drawCmpChart() {
   const marks = cmp.filter(x => x.gddl_tier > 0).map(x => ({ x: x.gddl_tier, y: x.score, label: x.name.length > 14 ? x.name.slice(0, 13) + '…' : x.name, color: x.color }));
-  logChart($('cmpChart'), functionCurve(), 'GDDL tier', marks, [0, 5, 10, 15, 20, 25, 30, 35, 39]);
+  renderChart($('cmpChart'), functionCurve(), 'GDDL tier', marks, [0, 5, 10, 15, 20, 25, 30, 35, 39], currentScale);
 }
 
 (function buildLegend() {
