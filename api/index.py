@@ -8,64 +8,65 @@ def calculate_score(s, g, a):
     list_bonus = (10 / 9) ** (149 - (a - 1) / 7) if a > 0 else 1.0
     return round(base + list_bonus - 2, 2)
 
-def parse_gd_levels(raw_text):
-    if not raw_text or raw_text == "-1" or "#" not in raw_text:
-        return []
-    
-    parts = raw_text.split("#")
-    levels_raw = parts[0].split("|")
-    creators_raw = parts[1].split("|") if len(parts) > 1 else []
-    
-    creators = {}
-    for c in creators_raw:
-        c_parts = c.split(":")
-        if len(c_parts) >= 2:
-            creators[c_parts[0]] = c_parts[1]
-            
-    parsed = []
-    for lvl_str in levels_raw:
-        if not lvl_str:
-            continue
-        kv = lvl_str.split(":")
-        data = {kv[i]: kv[i + 1] for i in range(0, len(kv) - 1, 2)}
-        
-        lvl_id = int(data.get("1", 0))
-        name = data.get("2", "Unknown")
-        creator_id = data.get("6", "")
-        stars = int(data.get("18", 0))
-        downloads = int(data.get("10", 0))
-        
-        if lvl_id > 0:
-            parsed.append({
-                "id": lvl_id,
-                "name": name,
-                "author": creators.get(creator_id, "Unknown"),
-                "stars": stars,
-                "downloads": downloads
-            })
-    return parsed
-
 @app.route("/api/search")
 def search_levels():
     query = request.args.get("q", "").strip()
     if not query:
         return jsonify({"exact": [], "contains": []})
-    
+
+    levels = []
+    seen_ids = set()
+
+    # 1. Query GDDL's public level list endpoint
     try:
-        res = requests.post(
-            "https://boomlings.com",
-            data={
-                "str": query,
-                "star": 1,
-                "type": 0,
-                "secret": "Wmfd2893gb7"
-            },
-            headers={"User-Agent": ""},
+        res = requests.get(
+            "https://gdladder.com",
+            params={"name": query, "limit": 25},
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=6
         )
-        levels = parse_gd_levels(res.text)
-    except Exception as e:
-        return jsonify({"exact": [], "contains": [], "error": str(e)})
+        if res.status_code == 200:
+            data = res.json()
+            items = data if isinstance(data, list) else data.get("levels", data.get("data", []))
+            for item in items:
+                lvl_id = item.get("ID") or item.get("id")
+                name = item.get("Name") or item.get("name") or "Unknown"
+                author = item.get("Publisher") or item.get("Author") or item.get("author") or "Unknown"
+                rating = float(item.get("Rating") or item.get("rating") or 0.0)
+                if lvl_id and lvl_id not in seen_ids:
+                    seen_ids.add(lvl_id)
+                    levels.append({
+                        "id": lvl_id,
+                        "name": name,
+                        "author": author,
+                        "stars": 10,
+                        "gddl_tier": round(rating, 2),
+                        "downloads": 1000
+                    })
+    except Exception:
+        pass
+
+    # 2. Fallback / Supplement with AREDL's full Extreme Demon list
+    try:
+        aredl_res = requests.get("https://aredl.net", timeout=6)
+        if aredl_res.status_code == 200:
+            q_low = query.lower()
+            for item in aredl_res.json():
+                name = item.get("name", "")
+                if q_low in name.lower():
+                    lvl_id = item.get("level_id") or item.get("id")
+                    if lvl_id and lvl_id not in seen_ids:
+                        seen_ids.add(lvl_id)
+                        levels.append({
+                            "id": lvl_id,
+                            "name": name,
+                            "author": item.get("publisher", {}).get("name", "AREDL") if isinstance(item.get("publisher"), dict) else "AREDL",
+                            "stars": 10,
+                            "gddl_tier": 0.0,
+                            "downloads": 500
+                        })
+    except Exception:
+        pass
 
     q_lower = query.lower()
     exact_matches = []
@@ -78,9 +79,6 @@ def search_levels():
         elif q_lower in name_lower:
             contains_matches.append(lvl)
 
-    exact_matches.sort(key=lambda x: x["downloads"], reverse=True)
-    contains_matches.sort(key=lambda x: x["downloads"], reverse=True)
-
     return jsonify({
         "exact": exact_matches,
         "contains": contains_matches
@@ -90,17 +88,14 @@ def search_levels():
 def get_level_score(level_id):
     name = request.args.get("name", "Unknown")
     author = request.args.get("author", "Unknown")
-    stars = int(request.args.get("stars", 0))
-
-    if stars == 0:
-        return jsonify({"error": f"{name} is unrated (0★) and cannot be scored."}), 400
+    stars = int(request.args.get("stars", 10))
 
     gddl_tier = 0.0
     aredl_rank = 0
 
     if stars == 10:
         try:
-            gddl_res = requests.get(f"https://gdladder.com{level_id}", timeout=5)
+            gddl_res = requests.get(f"https://gdladder.com/{level_id}", timeout=5)
             if gddl_res.status_code == 200:
                 gddl_json = gddl_res.json()
                 gddl_tier = float(gddl_json.get("Rating") or 0.0)
@@ -108,7 +103,7 @@ def get_level_score(level_id):
             pass
 
         try:
-            aredl_res = requests.get(f"https://aredl.net{level_id}", timeout=5)
+            aredl_res = requests.get(f"https://aredl.net/{level_id}", timeout=5)
             if aredl_res.status_code == 200:
                 aredl_json = aredl_res.json()
                 aredl_rank = int(aredl_json.get("position") or 0)
