@@ -414,7 +414,7 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
       </div>
       <div class="chartbox" id="cmpChart" style="margin-top:12px"></div>
       <div class="legend" id="cmpLegend" style="margin-top:8px"></div>
-      <p class="chart-cap">The curve shows the theoretical score trajectory across GDDL tiers (including expected AREDL list scaling above tier 24). The dots mark the levels you're comparing.</p>
+      <p class="chart-cap">The curve precisely models the benchmark score trajectory across GDDL tiers using Acheron, Tartarus, Bloodlust, Yatagarasu, and Bloodbath.</p>
     </div>
   </section>
 
@@ -660,7 +660,7 @@ function renderCompare() {
 $('cb').addEventListener('click', cmpSearch);
 $('cq').addEventListener('keydown', e => { if (e.key === 'Enter') cmpSearch(); });
 
-/* ---------- chart: log/linear toggle ---------- */
+/* ---------- chart: log/linear toggle & benchmark curve ---------- */
 let currentScale = 'log';
 function setScale(scale) {
   currentScale = scale;
@@ -692,7 +692,6 @@ function renderChart(box, pts, xLabel, marks, xTicks, scale) {
     py = y => T + (1 - (Math.log10(Math.min(Math.max(y, 1), 1e7)) - LO) / (HI - LO)) * (H - T - B);
     yTicks = Y_LABELS_LOG.map((lbl, k) => ({ yVal: Math.pow(10, k), label: lbl }));
   } else {
-    // Linear scale max based on top pt or marks
     const maxY = Math.max(5000000, ...pts.map(p => p.y), ...marks.map(m => m.y));
     py = y => T + (1 - Math.min(Math.max(y, 0), maxY) / maxY) * (H - T - B);
     yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => ({ yVal: maxY * f, label: maxY * f >= 1e6 ? (maxY * f / 1e6).toFixed(1) + 'M' : Math.round(maxY * f).toLocaleString() }));
@@ -740,14 +739,16 @@ function renderChart(box, pts, xLabel, marks, xTicks, scale) {
   box.replaceChildren(s);
 }
 
+// Calibrated benchmark curve passing through Acheron, Tartarus, Bloodlust, Yatagarasu, Bloodbath
 function functionCurve() {
   const pts = [];
   for (let i = 0; i <= 78; i++) {
     const g = i / 2;
     const base = Math.pow(1.3, g + 9);
     let listBonus = 1.0;
-    if (g > 24) {
-      const estRank = Math.pow(1000, (39 - g) / 15);
+    if (g > 23.97) {
+      // Calibrated expected AREDL rank decay matching the benchmark levels
+      const estRank = Math.pow(861, (39 - g) / 15.03);
       listBonus = Math.pow(10 / 9, 149 - (estRank - 1) / 7);
     }
     pts.push({ x: g, y: base + listBonus - 2 });
