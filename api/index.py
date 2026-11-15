@@ -414,7 +414,7 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
       </div>
       <div class="chartbox" id="cmpChart" style="margin-top:12px"></div>
       <div class="legend" id="cmpLegend" style="margin-top:8px"></div>
-      <p class="chart-cap">The curve precisely models the benchmark score trajectory across GDDL tiers using Acheron, Tartarus, Bloodlust, Yatagarasu, and Bloodbath.</p>
+      <p class="chart-cap">The curve follows the standard baseline up to tier 30, and your Desmos logistic curve model from tier 30 onwards.</p>
     </div>
   </section>
 
@@ -660,7 +660,7 @@ function renderCompare() {
 $('cb').addEventListener('click', cmpSearch);
 $('cq').addEventListener('keydown', e => { if (e.key === 'Enter') cmpSearch(); });
 
-/* ---------- chart: log/linear toggle & benchmark curve ---------- */
+/* ---------- chart: log/linear toggle & Desmos logistic curve ---------- */
 let currentScale = 'log';
 function setScale(scale) {
   currentScale = scale;
@@ -739,19 +739,18 @@ function renderChart(box, pts, xLabel, marks, xTicks, scale) {
   box.replaceChildren(s);
 }
 
-// Calibrated benchmark curve passing through Acheron, Tartarus, Bloodlust, Yatagarasu, Bloodbath
+// Function curve: Linear/standard up to tier 30, then Desmos logistic curve model
 function functionCurve() {
   const pts = [];
   for (let i = 0; i <= 78; i++) {
     const g = i / 2;
-    const base = Math.pow(1.3, g + 9);
-    let listBonus = 1.0;
-    if (g > 23.97) {
-      // Calibrated expected AREDL rank decay matching the benchmark levels
-      const estRank = Math.pow(861, (39 - g) / 15.03);
-      listBonus = Math.pow(10 / 9, 149 - (estRank - 1) / 7);
+    let y;
+    if (g <= 30) {
+      y = Math.pow(1.3, g + 9) - 1;
+    } else {
+      y = 7146482.46 / (1 + Math.exp(-(0.61511 * g - 23.25027)));
     }
-    pts.push({ x: g, y: base + listBonus - 2 });
+    pts.push({ x: g, y: Math.max(y, 0) });
   }
   return pts;
 }
