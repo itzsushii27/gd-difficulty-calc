@@ -1,4 +1,5 @@
 import os
+import csv
 import json
 import math
 import re
@@ -234,28 +235,63 @@ def _save_tier_cache():
         pass
 
 
+GDDL_CSV = os.environ.get("GDDL_CSV", "gddl_levels.csv")  # optional full GDDL export (level ID + tier)
+_csv_levels = None
+
+
+def load_csv_levels():
+    """[(level_id, tier)] from the optional CSV, or [] if it isn't there."""
+    global _csv_levels
+    if _csv_levels is not None:
+        return _csv_levels
+    out = []
+    try:
+        with open(GDDL_CSV, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            keys = [k for k in (reader.fieldnames or []) if k]
+            low = {k: k.strip().lower() for k in keys}
+            id_key = next((k for k in keys if low[k] in ("id", "level_id", "levelid")), None) or \
+                next((k for k in keys if "id" in low[k].split() or low[k].endswith(" id")), None)
+            tier_key = next((k for k in keys if "tier" in low[k]), None) or \
+                next((k for k in keys if "rating" in low[k] and "enjoy" not in low[k]), None)
+            if id_key and tier_key:
+                for row in reader:
+                    lid, t = to_int(row.get(id_key)), to_float(row.get(tier_key))
+                    if lid and t > 0:
+                        out.append((lid, t))
+    except OSError:
+        pass
+    _csv_levels = out
+    return out
+
+
 def build_avg_curve():
-    """Return [{x, y}] for tiers 0..39. Always returns a full curve."""
+    """Return [{x, y}] for tiers 0..39: average score of a level at each tier.
+    Every level is scored as calculate_score(10, tier, aredl_rank) (rank 0 if unlisted)."""
     index = get_aredl_index()
+    full = load_csv_levels()
+    if full:  # every demon on GDDL: listed ones get their rank, the rest are unranked
+        samples = [(t, index.get(lid, 0)) for lid, t in full]
+    else:     # fallback: only AREDL-listed levels we've looked up
+        samples = [(_tiers[lid], pos) for lid, pos in index.items() if pos <= AVG_MAX_LEVELS and _tiers.get(lid)]
     buckets = {}
-    for lid, pos in index.items():
-        t = _tiers.get(lid)
-        if pos <= AVG_MAX_LEVELS and t:
-            buckets.setdefault(round(t), []).append(calculate_score(10, t, pos))
+    for t, pos in samples:
+        b = max(1, min(39, round(t)))
+        buckets.setdefault(b, []).append(calculate_score(10, b, pos))
 
     # log-ratio of (average score) / (unranked score) at each tier that has data
     known = sorted(
         (b, math.log(max(sum(v) / len(v), 1e-9) / max(calculate_score(10, b, 0), 1e-9)))
         for b, v in buckets.items()
     )
-    if known:  # below the lowest listed tier, levels are unranked -> ratio fades to 1
+    if known and not full:  # partial data: below the lowest listed tier the ratio fades to 1
         known.insert(0, (known[0][0] - 3, 0.0))
 
     def ln_ratio(x):
         if not known:
             return 0.0
         if x <= known[0][0]:
-            return known[0][1]
+            return known[0][1] if full else 0.0 if x < known[0][0] - 3 else known[0][1]
         if x >= known[-1][0]:
             return known[-1][1]
         for (x1, y1), (x2, y2) in zip(known, known[1:]):
@@ -263,11 +299,7 @@ def build_avg_curve():
                 return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
         return 0.0
 
-    pts = []
-    for i in range(0, 79):
-        x = i / 2
-        pts.append({"x": x, "y": round(calculate_score(10, x, 0) * math.exp(ln_ratio(x)), 2)})
-    return pts
+    return [{"x": i / 2, "y": round(calculate_score(10, i / 2, 0) * math.exp(ln_ratio(i / 2)), 2)} for i in range(0, 79)]
 
 
 # ----------------------------------------------------------------------------
@@ -373,6 +405,9 @@ def curve():
 
 @app.route("/api/avg_curve")
 def avg_curve():
+    full = load_csv_levels()
+    if full:  # exact mode: no per-level lookups needed
+        return jsonify({"points": build_avg_curve(), "done": len(full), "total": len(full), "ready": True, "source": "csv"})
     _load_tier_cache()
     index = get_aredl_index()
     wanted = sorted((pos, lid) for lid, pos in index.items() if pos <= AVG_MAX_LEVELS)
@@ -388,6 +423,7 @@ def avg_curve():
         "done": len(wanted) - len(todo) + len(batch),
         "total": len(wanted),
         "ready": len(todo) <= len(batch),
+        "source": "aredl",
     })
 
 
@@ -798,7 +834,7 @@ async function refreshAvg() {
   try {
     const d = await (await fetch('/api/avg_curve')).json();
     avgPts = d.points;
-    $('avgStatus').textContent = d.ready ? '' : 'Building the average from AREDL levels… ' + d.done + '/' + d.total;
+    $('avgStatus').textContent = d.ready ? (d.source === 'csv' ? 'Average over all ' + d.total + ' demons in your GDDL export.' : 'Average of AREDL-listed levels only (add gddl_levels.csv for every demon).') : 'Building the average from AREDL levels… ' + d.done + '/' + d.total;
     drawCmpChart();
     if (!d.ready) avgTimer = setTimeout(refreshAvg, 300);
   } catch (e) { $('avgStatus').textContent = 'Could not load the average curve; showing the unranked score instead.'; }
