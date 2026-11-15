@@ -214,9 +214,6 @@ def fetch_aredl_rank(level_id):
 
 
 # --- Average score per GDDL tier ------------------------------------------------
-# For every AREDL-listed level we look up its GDDL tier (cached), score it with
-# calculate_score(10, tier, rank), and average the scores per tier. The curve is
-# then anchored to those averages (see build_avg_curve) so it exists at every tier.
 TIER_CACHE_FILE = os.environ.get("TIER_CACHE_FILE", "gddl_tier_cache.json")
 AVG_MAX_LEVELS = int(os.environ.get("AVG_MAX_LEVELS", "400"))  # top N AREDL levels used
 AVG_BATCH = 40  # levels looked up per /api/avg_curve call (works on serverless too)
@@ -263,9 +260,17 @@ def load_csv_levels():
                 next((k for k in keys if "id" in low[k].split() or low[k].endswith(" id")), None)
             tier_key = next((k for k in keys if "tier" in low[k]), None) or \
                 next((k for k in keys if "rating" in low[k] and "enjoy" not in low[k]), None)
-            if id_key and tier_key:
+            
+            if id_key:
                 for row in reader:
-                    lid, t = to_int(row.get(id_key)), to_float(row.get(tier_key))
+                    lid = to_int(row.get(id_key))
+                    t = to_float(row.get(tier_key)) if tier_key else 0.0
+                    
+                    # Fallback rule: if a top extreme demon has a missing/blank tier in the CSV,
+                    # automatically assign it tier 39.0
+                    if lid and (not t or t <= 0):
+                        t = 39.0
+
                     if lid and t > 0:
                         out.append((lid, t))
     except OSError:
@@ -275,8 +280,7 @@ def load_csv_levels():
 
 
 def build_avg_curve():
-    """Return [{x, y}] for tiers 0..39: average score of a level at each tier.
-    Every level is scored as calculate_score(10, tier, aredl_rank) (rank 0 if unlisted)."""
+    """Return [{x, y}] for tiers 0..39: average score of a level at each tier."""
     index = get_aredl_index()
     full = load_csv_levels()
     if full:  # every demon on GDDL: listed ones get their rank, the rest are unranked
@@ -288,12 +292,11 @@ def build_avg_curve():
         b = max(1, min(39, round(t)))
         buckets.setdefault(b, []).append(calculate_score(10, b, pos))
 
-    # log-ratio of (average score) / (unranked score) at each tier that has data
     known = sorted(
         (b, math.log(max(sum(v) / len(v), 1e-9) / max(calculate_score(10, b, 0), 1e-9)))
         for b, v in buckets.items()
     )
-    if known and not full:  # partial data: below the lowest listed tier the ratio fades to 1
+    if known and not full:
         known.insert(0, (known[0][0] - 3, 0.0))
 
     def ln_ratio(x):
@@ -323,7 +326,6 @@ def search_levels():
     levels = []
     seen = set()
 
-    # A pure number is treated as a level ID lookup first.
     if re.fullmatch(r"\d{1,10}", query):
         lvl = fetch_level(int(query))
         if lvl:
@@ -342,7 +344,7 @@ def search_levels():
     q = query.lower()
     exact, contains = [], []
     for lvl in levels:
-        if lvl["stars"] <= 0:  # only rated levels have a score
+        if lvl["stars"] <= 0:
             continue
         n = lvl["name"].lower()
         if n == q or str(lvl["id"]) == q:
@@ -420,7 +422,7 @@ def curve():
 @app.route("/api/avg_curve")
 def avg_curve():
     full = load_csv_levels()
-    if full:  # exact mode: no per-level lookups needed
+    if full:
         return jsonify({"points": build_avg_curve(), "done": len(full), "total": len(full), "ready": True, "source": "csv"})
     _load_tier_cache()
     index = get_aredl_index()
@@ -806,7 +808,6 @@ function logChart(box, pts, xLabel, marks, xTicks) {
   const px = x => L + (x - x0) / ((x1 - x0) || 1) * (W - L - R);
   const py = y => T + (1 - (Math.log10(Math.min(Math.max(y, 1), 1e7)) - LO) / (HI - LO)) * (H - T - B);
   const s = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img' });
-  // gradient along x, easy -> extreme
   const defs = svgEl('defs', {}), grad = svgEl('linearGradient', { id: 'tierGrad', gradientUnits: 'userSpaceOnUse', x1: px(x0), x2: px(x1), y1: 0, y2: 0 });
   const stop = (o, c) => grad.appendChild(svgEl('stop', { offset: Math.min(Math.max(o, 0), 1), 'stop-color': c }));
   stop(0, BANDS[0].color);
@@ -833,8 +834,6 @@ function logChart(box, pts, xLabel, marks, xTicks) {
   });
   box.replaceChildren(s);
 }
-// Shown until the server's average curve arrives, so the line is always there:
-// the plain formula for an unranked 10★ level (same as calculate_score(10, tier, 0)).
 function fallbackCurve() {
   const pts = [];
   for (let i = 0; i <= 78; i++) { const x = i / 2; pts.push({ x: x, y: Math.pow(1.3, x + 9) + 1 - 2 }); }
@@ -850,7 +849,7 @@ async function refreshAvg() {
   try {
     const d = await (await fetch('/api/avg_curve')).json();
     avgPts = d.points;
-    $('avgStatus').textContent = d.ready ? (d.source === 'csv' ? 'Average over all ' + d.total + ' demons in your GDDL export.' : 'Average of AREDL-listed levels only (add gddl_levels.csv for every demon).') : 'Building the average from AREDL levels… ' + d.done + '/' + d.total;
+    $('avgStatus').textContent = d.ready ? (d.source === 'csv' ? 'Average over all ' + d.total + ' demons in your GDDL export.' : 'Average of AREDL-listed levels only.') : 'Building the average from AREDL levels… ' + d.done + '/' + d.total;
     drawCmpChart();
     if (!d.ready) avgTimer = setTimeout(refreshAvg, 300);
   } catch (e) { $('avgStatus').textContent = 'Could not load the average curve; showing the unranked score instead.'; }
