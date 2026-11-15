@@ -90,8 +90,10 @@ def get_level_score(level_id):
     })
 
 @app.route("/")
+@app.route("/api/index")
 def index():
     return render_template_string(HTML_TEMPLATE)
+
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
