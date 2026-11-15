@@ -545,14 +545,10 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
   <!-- COMPARE -->
   <section id="tab-cmp">
     <div class="card">
-      <div class="score-title">Compare two levels</div>
-      <p class="meta">Pick two levels to see which is harder and by how much.</p>
-      <div class="cmpgrid">
-        <div><div class="label" style="margin-top:0">Level A</div>
-          <div class="row"><input type="text" id="cqA" placeholder="Name or ID…"><button id="cbA">Search</button></div><div id="crA"></div></div>
-        <div><div class="label" style="margin-top:0">Level B</div>
-          <div class="row"><input type="text" id="cqB" placeholder="Name or ID…"><button id="cbB">Search</button></div><div id="crB"></div></div>
-      </div>
+      <div class="score-title">Compare levels</div>
+      <p class="meta">Add as many levels as you want. They're ranked by score and plotted on the graph below.</p>
+      <div class="row" style="margin-top:12px"><input type="text" id="cq" placeholder="Name or ID…" autocomplete="off"><button id="cb">Search</button></div>
+      <div id="cr"></div>
     </div>
     <div id="cmpResult"></div>
     <div class="card">
@@ -660,7 +656,7 @@ function renderRecent() {
 }
 function pushRecent(q) {
   const r = load('gdRecent').filter(x => x.toLowerCase() !== q.toLowerCase());
-  r.unshift(q); save('gdRecent', r.slice(0, 6)); renderRecent(); drawCmpChart(); refreshAvg();
+  r.unshift(q); save('gdRecent', r.slice(0, 6)); renderRecent();
 }
 
 /* ---------- search ---------- */
@@ -720,71 +716,78 @@ async function selectLevel(id) {
   } catch (e) { showCard([msg('Failed to calculate score.', true)]); }
 }
 
-/* ---------- compare ---------- */
-const cmp = { A: null, B: null };
-function sendToCompare(d) {
-  const k = !cmp.A ? 'A' : (!cmp.B ? 'B' : 'A');
-  cmp[k] = d; showTab('cmp'); renderSlot('A'); renderSlot('B'); renderVerdict();
+/* ---------- compare (any number of levels) ---------- */
+const cmp = [];
+const PALETTE = ['#ffffff', '#7cc7ff', '#ff8fd0', '#ffd166', '#9be564', '#ff9f6b', '#b8a1ff', '#5eead4', '#f87171', '#c4c4c4'];
+function sendToCompare(d) { addToCompare(d); showTab('cmp'); }
+function addToCompare(d) {
+  if (cmp.some(x => x.id === d.id)) return;
+  cmp.push(Object.assign({}, d));
+  renderCompare();
 }
-function renderSlot(k) {
-  const box = $('cr' + k); box.replaceChildren();
-  const d = cmp[k]; if (!d) return;
-  const info = fmt(d.score) + ' pts • ' + d.stars + '★' + (d.gddl_tier ? ' • tier ' + d.gddl_tier : '') + (d.aredl_rank ? ' • #' + d.aredl_rank : '');
-  box.appendChild(el('div', { class: 'stat' }, [el('b', { text: d.name }), el('span', { text: info })]));
-}
-async function cmpSearch(k) {
-  const q = $('cq' + k).value.trim(); if (!q) return;
-  cmp[k] = null; renderVerdict();
-  const box = $('cr' + k); box.replaceChildren(msg('Searching…'));
+async function cmpSearch() {
+  const q = $('cq').value.trim(); if (!q) return;
+  const box = $('cr'); box.replaceChildren(msg('Searching…'));
   try {
     const d = await (await fetch('/api/search?q=' + encodeURIComponent(q))).json();
     const all = d.exact.concat(d.contains).slice(0, 6);
     if (!all.length) { box.replaceChildren(msg('No rated levels found.', true)); return; }
     const f = document.createDocumentFragment();
-    all.forEach(l => f.appendChild(levelRow(l, false, () => cmpPick(k, l.id))));
+    all.forEach(l => f.appendChild(levelRow(l, false, () => cmpAdd(l.id))));
     box.replaceChildren(f);
   } catch (e) { box.replaceChildren(msg('Could not reach the server.', true)); }
 }
-async function cmpPick(k, id) {
-  $('cr' + k).replaceChildren(msg('Loading…'));
+async function cmpAdd(id) {
+  $('cr').replaceChildren(msg('Adding…'));
   try {
     const d = await (await fetch('/api/score/' + id)).json();
-    if (d.error) { $('cr' + k).replaceChildren(msg(d.error, true)); return; }
-    cmp[k] = d; renderSlot(k); renderVerdict();
-  } catch (e) { $('cr' + k).replaceChildren(msg('Failed to load level.', true)); }
+    if (d.error) { $('cr').replaceChildren(msg(d.error, true)); return; }
+    addToCompare(d); $('cr').replaceChildren(); $('cq').value = ''; $('cq').focus();
+  } catch (e) { $('cr').replaceChildren(msg('Failed to load level.', true)); }
 }
-function renderVerdict() {
+function renderCompare() {
+  cmp.forEach((x, i) => { x.color = PALETTE[i % PALETTE.length]; });
   drawCmpChart();
   const box = $('cmpResult'); box.replaceChildren();
-  const a = cmp.A, b = cmp.B; if (!a || !b) return;
-  const hi = a.score >= b.score ? a : b, lo = hi === a ? b : a;
-  const diff = hi.score - lo.score, tie = diff === 0;
-  const ratio = lo.score > 0 ? hi.score / lo.score : null;
-  const stat = (label, val) => el('div', { class: 'stat' }, [el('b', { text: val }), el('span', { text: label })]);
-  const dBase = Math.abs(hi.base - lo.base), dList = Math.abs(hi.list_bonus - lo.list_bonus);
-  const driver = tie ? '' : (dList > dBase ? 'Most of the gap comes from the AREDL list term.' : 'Most of the gap comes from the stars + tier term.');
-  const mx = Math.log10(hi.score + 1) || 1;
-  const bar = (d, cls) => el('div', null, [
-    el('div', { class: 'meta', text: d.name + ' — ' + fmt(d.score) }),
-    el('div', { class: 'logbar' }, [el('i', { class: cls, style: 'width:' + Math.max(2, Math.log10(Math.max(d.score, 0) + 1) / mx * 100) + '%' })])
-  ]);
+  if (!cmp.length) return;
+  const rows = cmp.slice().sort((a, b) => b.score - a.score), top = rows[0];
+  let head, sub = '';
+  if (rows.length === 1) { head = top.name; sub = fmt(top.score) + ' points'; }
+  else {
+    const second = rows[1], diff = top.score - second.score;
+    head = diff === 0 ? 'The top two are tied' : top.name + ' is the hardest';
+    sub = diff === 0 ? '' : 'ahead of ' + second.name + ' by ' + fmt(diff) + ' points' + (second.score > 0 ? ' (about ×' + fmt(top.score / second.score) + ')' : '');
+  }
+  const clear = el('button', { class: 'ghost small', text: 'Clear all' });
+  clear.addEventListener('click', () => { cmp.length = 0; renderCompare(); });
+  const body = el('tbody');
+  rows.forEach((x, i) => {
+    const rm = el('button', { class: 'ghost small', text: '✕' });
+    rm.addEventListener('click', () => { cmp.splice(cmp.indexOf(x), 1); renderCompare(); });
+    body.appendChild(el('tr', null, [
+      el('td', { text: i + 1 }),
+      el('td', null, [el('span', { class: 'dot', style: 'background:' + x.color }), x.name]),
+      el('td', { class: 'num', text: x.gddl_failed ? 'failed' : (x.gddl_tier || '–') }),
+      el('td', { class: 'num', text: x.aredl_rank ? '#' + x.aredl_rank : '–' }),
+      el('td', { class: 'num', text: fmt(x.score) }),
+      el('td', { class: 'num', text: i === 0 ? '–' : '−' + fmt(top.score - x.score) }),
+      el('td', { class: 'num', text: i === 0 || x.score <= 0 ? '–' : '×' + fmt(top.score / x.score) + ' lower' }),
+      el('td', null, [rm])
+    ]));
+  });
+  const warnings = cmp.filter(d => d.gddl_failed || !d.gddl_tier).map(d => el('p', { class: 'msg err', text: d.name + ': ' + (d.gddl_failed ? 'the GDDL lookup failed, so its score is missing the tier term. Remove it and add it again in a moment.' : 'no GDDL tier found, so it is not plotted on the graph.') }));
   box.appendChild(el('div', { class: 'card' }, [
-    el('div', { class: 'verdict', text: tie ? 'These two levels score exactly the same.' : hi.name + ' is harder' }),
-    el('div', { class: 'meta', text: tie ? '' : 'by ' + fmt(diff) + ' points' + (ratio ? ' (about ×' + fmt(ratio) + ')' : '') }),
-    el('div', { class: 'stats' }, [
-      stat('Difference', fmt(diff)),
-      stat('Ratio', ratio ? '×' + fmt(ratio) : '–'),
-      stat('Orders of magnitude', ratio ? Math.log10(ratio).toFixed(2) : '–')
+    el('div', { style: 'display:flex; justify-content:space-between; align-items:flex-start; gap:10px;' }, [
+      el('div', null, [el('div', { class: 'verdict', text: head }), el('div', { class: 'meta', text: sub })]), clear
     ]),
-    el('div', { class: 'label', text: 'Scores on a log scale' }),
-    bar(a, 'b1'), bar(b, 'b2'),
-    el('p', { class: 'meta', text: driver }),
-    ...[a, b].filter(d => d.gddl_failed || !d.gddl_tier).map(d => el('p', { class: 'msg err', text: d.name + ': ' + (d.gddl_failed ? 'the GDDL lookup failed, so its score is missing the tier term. Search it again in a moment.' : 'no GDDL tier found, so it is not plotted on the graph.') }))
-  ]));
+    el('div', { style: 'overflow-x:auto; margin-top:10px;' }, [el('table', null, [
+      el('thead', null, [el('tr', null, ['#', 'Level', 'Tier', 'AREDL', 'Score', 'Behind', 'Ratio', ''].map((h, i) => el('th', { class: i >= 2 && i <= 6 ? 'num' : '', text: h })))]),
+      body
+    ])])
+  ].concat(warnings)));
 }
-$('cbA').addEventListener('click', () => cmpSearch('A'));
-$('cbB').addEventListener('click', () => cmpSearch('B'));
-['A', 'B'].forEach(k => $('cq' + k).addEventListener('keydown', e => { if (e.key === 'Enter') cmpSearch(k); }));
+$('cb').addEventListener('click', cmpSearch);
+$('cq').addEventListener('keydown', e => { if (e.key === 'Enter') cmpSearch(); });
 
 /* ---------- log chart: average score vs GDDL tier ---------- */
 const BANDS = [
@@ -839,9 +842,7 @@ function fallbackCurve() {
 }
 let avgPts = null, avgTimer = null;
 function drawCmpChart() {
-  const marks = [];
-  if (cmp.A && cmp.A.gddl_tier > 0) marks.push({ x: cmp.A.gddl_tier, y: cmp.A.score, label: 'A', color: '#ffffff' });
-  if (cmp.B && cmp.B.gddl_tier > 0) marks.push({ x: cmp.B.gddl_tier, y: cmp.B.score, label: 'B', color: '#7cc7ff' });
+  const marks = cmp.filter(x => x.gddl_tier > 0).map(x => ({ x: x.gddl_tier, y: x.score, label: x.name.length > 14 ? x.name.slice(0, 13) + '…' : x.name, color: x.color }));
   logChart($('cmpChart'), avgPts || fallbackCurve(), 'GDDL tier', marks, [0, 5, 10, 15, 20, 25, 30, 35, 39]);
 }
 async function refreshAvg() {
@@ -897,7 +898,7 @@ async function loadRankTable() {
 
 $('searchBtn').addEventListener('click', searchLevels);
 $('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') searchLevels(); });
-renderRecent();
+renderRecent(); renderCompare(); refreshAvg();
 </script>
 </body>
 </html>
