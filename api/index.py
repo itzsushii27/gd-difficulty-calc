@@ -1,99 +1,40 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string
 import requests
 
 app = Flask(__name__)
 
-def calculate_score(s, g, a):
-    base = 1.3 ** (g + s - 1)
-    list_bonus = (10 / 9) ** (149 - (a - 1) / 7) if a > 0 else 1.0
-    return round(base + list_bonus - 2, 2)
-
-@app.route("/api/search")
-def search_levels():
-    query = request.args.get("q", "").strip()
-    if not query:
-        return jsonify([])
-    
-    try:
-        res = requests.get(
-            f"https://gdbrowser.com{requests.utils.quote(query)}",
-            params={"count": 10},
-            timeout=6
-        )
-        if res.status_code != 200 or res.text == "-1":
-            return jsonify([])
-        
-        levels = res.json()
-        results = []
-        for lvl in levels:
-            results.append({
-                "id": lvl.get("id"),
-                "name": lvl.get("name"),
-                "author": lvl.get("author"),
-                "stars": lvl.get("stars", 0),
-                "difficulty": lvl.get("difficulty", "Unknown")
-            })
-        return jsonify(results)
-    except Exception:
-        return jsonify([])
-
-@app.route("/api/score/<int:level_id>")
-def get_level_score(level_id):
-    # 1. Fetch Level Info from GDBrowser
-    try:
-        gd_res = requests.get(f"https://gdbrowser.com{level_id}", timeout=6)
-        if gd_res.status_code != 200 or gd_res.text == "-1":
-            return jsonify({"error": "Level not found on GDBrowser"}), 404
-        gd_data = gd_res.json()
-    except Exception:
-        return jsonify({"error": "Failed to connect to GDBrowser"}), 502
-
-    stars = gd_data.get("stars", 0)
-    name = gd_data.get("name", "Unknown")
-    author = gd_data.get("author", "Unknown")
-
-    if stars == 0:
-        return jsonify({"error": f"{name} is unrated (0★) and cannot be scored."}), 400
-
-    # 2. Fetch GDDL Tier (if 10-star Demon)
+@app.route("/api/demon-stats/<int:level_id>")
+def get_demon_stats(level_id):
     gddl_tier = 0.0
-    if stars == 10:
-        try:
-            gddl_res = requests.get(f"https://gdladder.com{level_id}", timeout=5)
-            if gddl_res.status_code == 200:
-                gddl_json = gddl_res.json()
-                gddl_tier = float(gddl_json.get("Rating") or 0.0)
-        except Exception:
-            pass
-
-    # 3. Fetch AREDL Rank (if 10-star Demon)
     aredl_rank = 0
-    if stars == 10:
-        try:
-            aredl_res = requests.get(f"https://aredl.net{level_id}", timeout=5)
-            if aredl_res.status_code == 200:
-                aredl_json = aredl_res.json()
-                aredl_rank = int(aredl_json.get("position") or 0)
-        except Exception:
-            pass
 
-    score = calculate_score(stars, gddl_tier, aredl_rank)
+    # 1. Fetch GDDL Tier
+    try:
+        gddl_res = requests.get(f"https://gdladder.com{level_id}", timeout=5)
+        if gddl_res.status_code == 200:
+            gddl_json = gddl_res.json()
+            gddl_tier = float(gddl_json.get("Rating") or 0.0)
+    except Exception:
+        pass
+
+    # 2. Fetch AREDL Rank
+    try:
+        aredl_res = requests.get(f"https://aredl.net{level_id}", timeout=5)
+        if aredl_res.status_code == 200:
+            aredl_json = aredl_res.json()
+            aredl_rank = int(aredl_json.get("position") or 0)
+    except Exception:
+        pass
 
     return jsonify({
-        "name": name,
-        "author": author,
-        "id": level_id,
-        "stars": stars,
         "gddl_tier": round(gddl_tier, 2),
-        "aredl_rank": aredl_rank,
-        "score": score
+        "aredl_rank": aredl_rank
     })
 
 @app.route("/")
 @app.route("/api/index")
 def index():
     return render_template_string(HTML_TEMPLATE)
-
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -132,6 +73,14 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
+        let cachedLevels = {};
+
+        function calculateScore(s, g, a) {
+            const base = Math.pow(1.3, g + s - 1);
+            const listBonus = a > 0 ? Math.pow(10 / 9, 149 - (a - 1) / 7) : 1.0;
+            return Math.round((base + listBonus - 2) * 100) / 100;
+        }
+
         async function searchLevels() {
             const query = document.getElementById('searchInput').value.trim();
             if (!query) return;
@@ -142,13 +91,18 @@ HTML_TEMPLATE = """
             list.innerHTML = '<div style="color:#aaa; padding:10px;">Searching GDBrowser...</div>';
             
             try {
-                const res = await fetch('/api/search?q=' + encodeURIComponent(query));
-                const levels = await res.json();
+                // Fetch directly from the user's browser to avoid Vercel IP blocks
+                const res = await fetch('https://gdbrowser.com' + encodeURIComponent(query) + '?count=10');
+                const text = await res.text();
                 
-                if (levels.length === 0) {
-                    list.innerHTML = '<div style="color:#ff5252; padding:10px;">No levels found (or GDBrowser rate-limited the request).</div>';
+                if (!res.ok || text === '-1') {
+                    list.innerHTML = '<div style="color:#ff5252; padding:10px;">No levels found.</div>';
                     return;
                 }
+                
+                const levels = JSON.parse(text);
+                cachedLevels = {};
+                levels.forEach(lvl => { cachedLevels[lvl.id] = lvl; });
                 
                 list.innerHTML = levels.map(lvl => `
                     <div class="level-item" onclick="selectLevel(${lvl.id})">
@@ -160,36 +114,47 @@ HTML_TEMPLATE = """
                     </div>
                 `).join('');
             } catch (err) {
-                list.innerHTML = '<div style="color:#ff5252; padding:10px;">Error connecting to server.</div>';
+                list.innerHTML = '<div style="color:#ff5252; padding:10px;">Browser blocked CORS or GDBrowser is offline.</div>';
             }
         }
 
         async function selectLevel(id) {
+            const lvl = cachedLevels[id];
             const card = document.getElementById('scoreCard');
             card.style.display = 'block';
-            card.innerHTML = '<div style="color:#aaa;">Calculating score from GDDL & AREDL...</div>';
-            
-            try {
-                const res = await fetch('/api/score/' + id);
-                const data = await res.json();
-                
-                if (data.error) {
-                    card.innerHTML = `<div style="color:#ff5252;">${data.error}</div>`;
-                    return;
-                }
-                
-                card.innerHTML = `
-                    <div style="font-size:1.2em; font-weight:bold;">${data.name} <span style="font-weight:normal; color:#aaa; font-size:0.85em;">by ${data.author}</span></div>
-                    <div class="score-number">${data.score.toLocaleString()}</div>
-                    <div class="level-meta">
-                        Stars: <strong>${data.stars}★</strong> &nbsp;|&nbsp; 
-                        GDDL Tier: <strong>${data.gddl_tier || 'N/A'}</strong> &nbsp;|&nbsp; 
-                        AREDL Rank: <strong>${data.aredl_rank ? '#' + data.aredl_rank : 'Unranked'}</strong>
-                    </div>
-                `;
-            } catch (err) {
-                card.innerHTML = '<div style="color:#ff5252;">Failed to fetch level score.</div>';
+
+            if (!lvl || lvl.stars === 0) {
+                card.innerHTML = `<div style="color:#ff5252;">${lvl ? lvl.name : 'Level'} is unrated (0★) and cannot be scored.</div>`;
+                return;
             }
+
+            card.innerHTML = '<div style="color:#aaa;">Fetching GDDL & AREDL stats...</div>';
+            
+            let gddl = 0;
+            let aredl = 0;
+
+            if (lvl.stars === 10) {
+                try {
+                    const res = await fetch('/api/demon-stats/' + id);
+                    const stats = await res.json();
+                    gddl = stats.gddl_tier || 0;
+                    aredl = stats.aredl_rank || 0;
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+
+            const score = calculateScore(lvl.stars, gddl, aredl);
+
+            card.innerHTML = `
+                <div style="font-size:1.2em; font-weight:bold;">${lvl.name} <span style="font-weight:normal; color:#aaa; font-size:0.85em;">by ${lvl.author}</span></div>
+                <div class="score-number">${score.toLocaleString()}</div>
+                <div class="level-meta">
+                    Stars: <strong>${lvl.stars}★</strong> &nbsp;|&nbsp; 
+                    GDDL Tier: <strong>${gddl || 'N/A'}</strong> &nbsp;|&nbsp; 
+                    AREDL Rank: <strong>${aredl ? '#' + aredl : 'Unranked'}</strong>
+                </div>
+            `;
         }
     </script>
 </body>
