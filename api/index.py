@@ -739,19 +739,30 @@ function renderChart(box, pts, xLabel, marks, xTicks, scale) {
   box.replaceChildren(s);
 }
 
-// Function curve: Linear/standard up to tier 30, then Desmos logistic curve model
+// Function curve: Smooth transition from the original curve to the logistic curve
 function functionCurve() {
   const pts = [];
+
   for (let i = 0; i <= 78; i++) {
     const g = i / 2;
+    const linear = Math.pow(1.3, g + 9) - 1;
+    const logistic = 7146482.46 / (1 + Math.exp(-(0.61511 * g - 23.25027)));
+
     let y;
-    if (g <= 30) {
-      y = Math.pow(1.3, g + 9) - 1;
+
+    if (g <= 28) {
+      y = linear;
+    } else if (g >= 32) {
+      y = logistic;
     } else {
-      y = 7146482.46 / (1 + Math.exp(-(0.61511 * g - 23.25027)));
+      const t = (g - 28) / 4;
+      const blend = t * t * (3 - 2 * t);
+      y = linear * (1 - blend) + logistic * blend;
     }
+
     pts.push({ x: g, y: Math.max(y, 0) });
   }
+
   return pts;
 }
 
