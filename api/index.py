@@ -287,6 +287,20 @@ def calc():
     })
 
 
+@app.route("/api/curve")
+def curve():
+    s = min(max(to_int(request.args.get("s"), 10), 1), 10)
+    g = min(max(to_float(request.args.get("g"), 0.0), 0.0), 39.0)
+    a = min(max(to_int(request.args.get("a"), 0), 0), 1000)
+    if request.args.get("mode") == "rank":
+        xs = [1] + list(range(5, 501, 5))
+        pts = [{"x": x, "y": calculate_score(s, g, x)} for x in xs]
+    else:
+        xs = [i / 2 for i in range(0, 79)]
+        pts = [{"x": x, "y": calculate_score(s, x, a)} for x in xs]
+    return jsonify({"points": pts})
+
+
 @app.route("/")
 @app.route("/api/index")
 def index():
@@ -351,8 +365,15 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; } th.num { text-al
 .formula { background:var(--panel2); border-radius:10px; padding:14px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.92rem; overflow-x:auto; line-height:1.8; }
 .formula .t1 { color:var(--accent); } .formula .t2 { color:var(--accent2); }
 h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px 0; }
+.cmpgrid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
+.cmpgrid .row input { flex:1; }
+.cmpgrid .stat { margin-top:10px; } .cmpgrid .stat b { font-size:1rem; }
+.verdict { font-size:1.2rem; font-weight:800; color:var(--accent); margin:6px 0 2px; }
+.logbar { height:14px; border-radius:7px; background:var(--line); margin:4px 0 12px; overflow:hidden; } .logbar i { display:block; height:100%; }
+.chartbox svg { width:100%; height:auto; display:block; }
+.chart-cap { color:var(--muted); font-size:.82rem; margin:6px 0 0; }
 .hidden { display:none; }
-@media (max-width:520px) { .stats { grid-template-columns:1fr 1fr; } .score-num { font-size:2.1rem; } }
+@media (max-width:520px) { .cmpgrid { grid-template-columns:1fr; } .stats { grid-template-columns:1fr 1fr; } .score-num { font-size:2.1rem; } }
 </style>
 </head>
 <body>
@@ -363,6 +384,7 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
   </header>
   <nav>
     <button class="active" data-tab="calc">Calculator</button>
+    <button data-tab="cmp">Compare</button>
     <button data-tab="play">Playground</button>
     <button data-tab="how">How it works</button>
   </nav>
@@ -378,16 +400,21 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
       <div id="resultsArea"></div>
     </div>
     <div id="scoreCard" class="card hidden"></div>
-    <div id="compareCard" class="card hidden">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <div class="score-title">Compare</div>
-        <button class="ghost small" id="clearCompare">Clear all</button>
+  </section>
+
+  <!-- COMPARE -->
+  <section id="tab-cmp" class="hidden">
+    <div class="card">
+      <div class="score-title">Compare two levels</div>
+      <p class="meta">Pick two levels to see which is harder and by how much.</p>
+      <div class="cmpgrid">
+        <div><div class="label" style="margin-top:0">Level A</div>
+          <div class="row"><input type="text" id="cqA" placeholder="Name or ID…"><button id="cbA">Search</button></div><div id="crA"></div></div>
+        <div><div class="label" style="margin-top:0">Level B</div>
+          <div class="row"><input type="text" id="cqB" placeholder="Name or ID…"><button id="cbB">Search</button></div><div id="crB"></div></div>
       </div>
-      <table>
-        <thead><tr><th>#</th><th>Level</th><th class="num">Stars</th><th class="num">Tier</th><th class="num">AREDL</th><th class="num">Score</th><th></th></tr></thead>
-        <tbody id="compareBody"></tbody>
-      </table>
     </div>
+    <div id="cmpResult"></div>
   </section>
 
   <!-- PLAYGROUND -->
@@ -400,6 +427,16 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
       <div class="slider"><div class="top"><span>AREDL rank <span class="meta">(0 = unranked)</span></span><input type="number" id="pA" min="0" max="500" step="1" value="0"></div><input type="range" id="rA" min="0" max="500" step="1" value="0"></div>
       <div class="score-num" id="pScore">–</div>
       <div id="pBreak"></div>
+    </div>
+    <div class="card">
+      <div class="score-title">Score vs GDDL tier <span class="meta">(log scale)</span></div>
+      <div class="chartbox" id="pChartT"></div>
+      <p class="chart-cap">Uses your current stars and rank. Each tier multiplies the base term by 1.3, so the curve is a straight line on a log axis until the list term stops dominating.</p>
+    </div>
+    <div class="card">
+      <div class="score-title">Score vs AREDL rank <span class="meta">(log scale)</span></div>
+      <div class="chartbox" id="pChartR"></div>
+      <p class="chart-cap">Uses your current stars and tier. Rank 0 (unranked) has no point on this curve.</p>
     </div>
   </section>
 
@@ -422,6 +459,9 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
         <li><b>Tier:</b> community-voted GDDL rating (0 if the level isn't on GDDL). Only 10★ demons look it up.</li>
         <li><b>Rank:</b> current AREDL position (0 if unranked). Only 10★ demons look it up.</li>
       </ul>
+      <h3>Score by AREDL rank</h3>
+      <div class="chartbox" id="rankChart"></div>
+      <p class="chart-cap">10★, tier 10, log scale. A straight line on a log axis means exponential growth: every 7 ranks multiplies the list term by 10/9.</p>
       <h3>What the list term looks like</h3>
       <table><thead><tr><th>AREDL rank</th><th class="num">List term</th></tr></thead><tbody id="rankTable"><tr><td colspan="2" class="meta">Loading…</td></tr></tbody></table>
       <div class="actions"><button class="ghost" id="toPlay">Try it in the playground</button></div>
@@ -448,7 +488,7 @@ function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } ca
 /* ---------- tabs ---------- */
 function showTab(name) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
-  ['calc', 'play', 'how'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+  ['calc', 'cmp', 'play', 'how'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
   if (name === 'how') loadRankTable();
   if (name === 'play') runPlay();
 }
@@ -492,12 +532,12 @@ function pushRecent(q) {
 /* ---------- search ---------- */
 function setArea(node) { $('resultsArea').replaceChildren(node); }
 function msg(text, err) { return el('div', { class: 'msg' + (err ? ' err' : ''), text }); }
-function levelRow(l, exact) {
+function levelRow(l, exact, onClick) {
   const row = el('div', { class: 'level' + (exact ? ' exact' : '') }, [
     el('div', null, [el('div', { text: l.name, style: 'font-weight:700' }), el('div', { class: 'meta', text: 'by ' + l.author + ' • ID ' + l.id })]),
     el('div', { class: 'badge', text: l.stars + '★' })
   ]);
-  row.addEventListener('click', () => selectLevel(l.id));
+  row.addEventListener('click', onClick || (() => selectLevel(l.id)));
   return row;
 }
 function group(title, list, exact) {
@@ -530,8 +570,8 @@ async function selectLevel(id) {
     const d = await (await fetch('/api/score/' + id)).json();
     if (d.error) { showCard([msg(d.error, true)]); return; }
     const stat = (label, val) => el('div', { class: 'stat' }, [el('b', { text: val }), el('span', { text: label })]);
-    const add = el('button', { text: 'Add to compare' });
-    add.addEventListener('click', () => addCompare(d));
+    const add = el('button', { text: 'Compare…' });
+    add.addEventListener('click', () => sendToCompare(d));
     const play = el('button', { class: 'ghost', text: 'Open in playground' });
     play.addEventListener('click', () => { setPlay(d.stars, d.gddl_tier, d.aredl_rank); showTab('play'); });
     const copy = el('button', { class: 'ghost', text: 'Copy score' });
@@ -547,27 +587,114 @@ async function selectLevel(id) {
 }
 
 /* ---------- compare ---------- */
-function addCompare(d) {
-  const list = load('gdCompare').filter(x => x.id !== d.id);
-  list.push({ id: d.id, name: d.name, stars: d.stars, tier: d.gddl_tier, rank: d.aredl_rank, score: d.score });
-  save('gdCompare', list); renderCompare();
+const cmp = { A: null, B: null };
+function sendToCompare(d) {
+  const k = !cmp.A ? 'A' : (!cmp.B ? 'B' : 'A');
+  cmp[k] = d; showTab('cmp'); renderSlot('A'); renderSlot('B'); renderVerdict();
 }
-function renderCompare() {
-  const list = load('gdCompare').sort((a, b) => b.score - a.score);
-  $('compareCard').classList.toggle('hidden', !list.length);
-  const body = $('compareBody'); body.replaceChildren();
-  list.forEach((x, i) => {
-    const rm = el('button', { class: 'ghost small', text: '✕' });
-    rm.addEventListener('click', () => { save('gdCompare', load('gdCompare').filter(y => y.id !== x.id)); renderCompare(); });
-    body.appendChild(el('tr', null, [
-      el('td', { text: i + 1 }), el('td', { text: x.name }),
-      el('td', { class: 'num', text: x.stars + '★' }), el('td', { class: 'num', text: x.tier || '–' }),
-      el('td', { class: 'num', text: x.rank ? '#' + x.rank : '–' }), el('td', { class: 'num', text: fmt(x.score) }),
-      el('td', null, [rm])
-    ]));
-  });
+function renderSlot(k) {
+  const box = $('cr' + k); box.replaceChildren();
+  const d = cmp[k]; if (!d) return;
+  const info = fmt(d.score) + ' pts • ' + d.stars + '★' + (d.gddl_tier ? ' • tier ' + d.gddl_tier : '') + (d.aredl_rank ? ' • #' + d.aredl_rank : '');
+  box.appendChild(el('div', { class: 'stat' }, [el('b', { text: d.name }), el('span', { text: info })]));
 }
-$('clearCompare').addEventListener('click', () => { save('gdCompare', []); renderCompare(); });
+async function cmpSearch(k) {
+  const q = $('cq' + k).value.trim(); if (!q) return;
+  cmp[k] = null; renderVerdict();
+  const box = $('cr' + k); box.replaceChildren(msg('Searching…'));
+  try {
+    const d = await (await fetch('/api/search?q=' + encodeURIComponent(q))).json();
+    const all = d.exact.concat(d.contains).slice(0, 6);
+    if (!all.length) { box.replaceChildren(msg('No rated levels found.', true)); return; }
+    const f = document.createDocumentFragment();
+    all.forEach(l => f.appendChild(levelRow(l, false, () => cmpPick(k, l.id))));
+    box.replaceChildren(f);
+  } catch (e) { box.replaceChildren(msg('Could not reach the server.', true)); }
+}
+async function cmpPick(k, id) {
+  $('cr' + k).replaceChildren(msg('Loading…'));
+  try {
+    const d = await (await fetch('/api/score/' + id)).json();
+    if (d.error) { $('cr' + k).replaceChildren(msg(d.error, true)); return; }
+    cmp[k] = d; renderSlot(k); renderVerdict();
+  } catch (e) { $('cr' + k).replaceChildren(msg('Failed to load level.', true)); }
+}
+function renderVerdict() {
+  const box = $('cmpResult'); box.replaceChildren();
+  const a = cmp.A, b = cmp.B; if (!a || !b) return;
+  const hi = a.score >= b.score ? a : b, lo = hi === a ? b : a;
+  const diff = hi.score - lo.score, tie = diff === 0;
+  const ratio = lo.score > 0 ? hi.score / lo.score : null;
+  const stat = (label, val) => el('div', { class: 'stat' }, [el('b', { text: val }), el('span', { text: label })]);
+  const dBase = Math.abs(hi.base - lo.base), dList = Math.abs(hi.list_bonus - lo.list_bonus);
+  const driver = tie ? '' : (dList > dBase ? 'Most of the gap comes from the AREDL list term.' : 'Most of the gap comes from the stars + tier term.');
+  const mx = Math.log10(hi.score + 1) || 1;
+  const bar = (d, cls) => el('div', null, [
+    el('div', { class: 'meta', text: d.name + ' — ' + fmt(d.score) }),
+    el('div', { class: 'logbar' }, [el('i', { class: cls, style: 'width:' + Math.max(2, Math.log10(Math.max(d.score, 0) + 1) / mx * 100) + '%' })])
+  ]);
+  box.appendChild(el('div', { class: 'card' }, [
+    el('div', { class: 'verdict', text: tie ? 'These two levels score exactly the same.' : hi.name + ' is harder' }),
+    el('div', { class: 'meta', text: tie ? '' : 'by ' + fmt(diff) + ' points' + (ratio ? ' (about ×' + fmt(ratio) + ')' : '') }),
+    el('div', { class: 'stats' }, [
+      stat('Difference', fmt(diff)),
+      stat('Ratio', ratio ? '×' + fmt(ratio) : '–'),
+      stat('Orders of magnitude', ratio ? Math.log10(ratio).toFixed(2) : '–')
+    ]),
+    el('div', { class: 'label', text: 'Scores on a log scale' }),
+    bar(a, 'b1'), bar(b, 'b2'),
+    el('p', { class: 'meta', text: driver })
+  ]));
+}
+$('cbA').addEventListener('click', () => cmpSearch('A'));
+$('cbB').addEventListener('click', () => cmpSearch('B'));
+['A', 'B'].forEach(k => $('cq' + k).addEventListener('keydown', e => { if (e.key === 'Enter') cmpSearch(k); }));
+
+/* ---------- log charts ---------- */
+function svgEl(tag, attrs) { const e = document.createElementNS('http://www.w3.org/2000/svg', tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+const SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹';
+function sup(n) { return String(n).split('').map(c => c === '-' ? '⁻' : SUP[+c]).join(''); }
+function svgText(attrs, text) { const t = svgEl('text', attrs); t.textContent = text; return t; }
+function logChart(box, pts, xLabel, mark) {
+  const W = 640, H = 270, L = 62, R = 16, T = 14, B = 40;
+  const ys = pts.map(p => Math.max(p.y, 0.1));
+  const lo = Math.floor(Math.log10(Math.min(...ys)));
+  let hi = Math.ceil(Math.log10(Math.max(...ys)));
+  if (hi <= lo) hi = lo + 1;
+  const x0 = pts[0].x, x1 = pts[pts.length - 1].x;
+  const px = x => L + (x - x0) / ((x1 - x0) || 1) * (W - L - R);
+  const py = y => T + (1 - (Math.log10(Math.max(y, 0.1)) - lo) / (hi - lo)) * (H - T - B);
+  const s = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img' });
+  for (let k = lo; k <= hi; k++) {
+    const y = py(Math.pow(10, k));
+    s.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: 'var(--line)' }));
+    s.appendChild(svgText({ x: L - 8, y: y + 4, 'text-anchor': 'end', fill: 'var(--muted)', 'font-size': 11 }, '10' + sup(k)));
+  }
+  for (let i = 0; i <= 5; i++) {
+    const xv = x0 + (x1 - x0) * i / 5, x = px(xv);
+    s.appendChild(svgEl('line', { x1: x, x2: x, y1: H - B, y2: H - B + 4, stroke: 'var(--muted)' }));
+    s.appendChild(svgText({ x: x, y: H - B + 17, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 11 }, Math.round(xv * 10) / 10));
+  }
+  s.appendChild(svgText({ x: (L + W - R) / 2, y: H - 6, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 12 }, xLabel));
+  s.appendChild(svgEl('polyline', { points: pts.map(p => px(p.x).toFixed(1) + ',' + py(p.y).toFixed(1)).join(' '), fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2.5, 'stroke-linejoin': 'round' }));
+  if (mark) {
+    const cx = px(mark.x), cy = py(mark.y);
+    s.appendChild(svgEl('circle', { cx: cx, cy: cy, r: 5, fill: 'var(--accent2)' }));
+    s.appendChild(svgText({ x: cx + (cx > W - 130 ? -10 : 10), y: cy - 8, 'text-anchor': cx > W - 130 ? 'end' : 'start', fill: 'var(--text)', 'font-size': 12, 'font-weight': 700 }, fmt(mark.y)));
+  }
+  box.replaceChildren(s);
+}
+async function curve(mode, s, g, a) {
+  const d = await (await fetch('/api/curve?mode=' + mode + '&s=' + s + '&g=' + g + '&a=' + a)).json();
+  return d.points;
+}
+async function drawPlayCharts(score) {
+  const s = $('pS').value, g = $('pG').value, a = $('pA').value;
+  try {
+    logChart($('pChartT'), await curve('tier', s, g, a), 'GDDL tier', { x: +g, y: score });
+    logChart($('pChartR'), await curve('rank', s, g, a), 'AREDL rank', +a > 0 ? { x: +a, y: score } : null);
+  } catch (e) {}
+}
 
 /* ---------- playground ---------- */
 const pairs = [['pS', 'rS'], ['pG', 'rG'], ['pA', 'rA']];
@@ -581,6 +708,7 @@ function runPlay() {
       const d = await (await fetch('/api/calc?' + q)).json();
       $('pScore').textContent = fmt(d.score);
       $('pBreak').replaceChildren(breakdown(d.base, d.list_bonus));
+      drawPlayCharts(d.score);
     } catch (e) { $('pScore').textContent = '–'; }
   }, 100);
 }
@@ -593,6 +721,7 @@ pairs.forEach(([n, r]) => {
 let rankLoaded = false;
 async function loadRankTable() {
   if (rankLoaded) return;
+  try { logChart($('rankChart'), await curve('rank', 10, 10, 0), 'AREDL rank', null); } catch (e) {}
   const ranks = [1, 5, 10, 25, 50, 100, 150, 200, 300];
   try {
     const res = await Promise.all(ranks.map(r => fetch('/api/calc?s=1&g=0&a=' + r).then(x => x.json())));
@@ -604,7 +733,7 @@ async function loadRankTable() {
 
 $('searchBtn').addEventListener('click', searchLevels);
 $('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') searchLevels(); });
-renderRecent(); renderCompare();
+renderRecent();
 </script>
 </body>
 </html>
