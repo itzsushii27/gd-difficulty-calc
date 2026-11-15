@@ -1,11 +1,9 @@
 import os
-import csv
 import json
 import math
 import re
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from flask import Flask, request, jsonify, render_template_string
@@ -29,7 +27,7 @@ http.headers.update(HEADERS)
 
 
 # ----------------------------------------------------------------------------
-# Formula (unchanged)
+# Formula
 # ----------------------------------------------------------------------------
 def calculate_score(s, g, a):
     base = 1.3 ** (g + s - 1)
@@ -117,10 +115,10 @@ def _tier_from_html(html):
     text = re.sub(r"\s+", " ", text)
     m = re.search(r"Tier\s*(\d+)\s*\(\s*(\d+(?:\.\d+)?)\s*\)", text)
     if m:
-        return float(m.group(2))  # precise value
+        return float(m.group(2))
     m = re.search(r'content="Tier\s*(\d+(?:\.\d+)?)\s*[\u00b7|]', html)
     if m:
-        return float(m.group(1))  # rounded fallback from the meta description
+        return float(m.group(1))
     return None
 
 
@@ -167,7 +165,7 @@ def fetch_gddl_tier(level_id, debug=None):
                 return tier
         if loaded:
             return 0.0
-        time.sleep(0.7)  # likely rate-limited or a hiccup: wait and retry once
+        time.sleep(0.7)
     return None
 
 
@@ -203,7 +201,7 @@ def get_aredl_index():
                 by_id[gd_id] = pos
 
     with _aredl_lock:
-        if by_id:  # don't overwrite a good cache with a failed fetch
+        if by_id:
             _aredl_cache["by_id"] = by_id
             _aredl_cache["ts"] = time.time()
         return _aredl_cache["by_id"]
@@ -211,107 +209,6 @@ def get_aredl_index():
 
 def fetch_aredl_rank(level_id):
     return get_aredl_index().get(level_id, 0)
-
-
-# --- Average score per GDDL tier ------------------------------------------------
-TIER_CACHE_FILE = os.environ.get("TIER_CACHE_FILE", "gddl_tier_cache.json")
-AVG_MAX_LEVELS = int(os.environ.get("AVG_MAX_LEVELS", "400"))  # top N AREDL levels used
-AVG_BATCH = 40  # levels looked up per /api/avg_curve call (works on serverless too)
-_tiers = {}
-_tiers_loaded = False
-
-
-def _load_tier_cache():
-    global _tiers_loaded
-    if _tiers_loaded:
-        return
-    _tiers_loaded = True
-    try:
-        with open(TIER_CACHE_FILE) as f:
-            _tiers.update({int(k): float(v) for k, v in json.load(f).items()})
-    except (OSError, ValueError):
-        pass
-
-
-def _save_tier_cache():
-    try:
-        with open(TIER_CACHE_FILE, "w") as f:
-            json.dump({k: v for k, v in _tiers.items() if v > 0}, f)
-    except OSError:
-        pass
-
-
-GDDL_CSV = os.environ.get("GDDL_CSV", "gddl_levels.csv")  # optional full GDDL export (level ID + tier)
-_csv_levels = None
-
-
-def load_csv_levels():
-    """[(level_id, tier)] from the optional CSV, or [] if it isn't there."""
-    global _csv_levels
-    if _csv_levels is not None:
-        return _csv_levels
-    out = []
-    try:
-        with open(GDDL_CSV, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            keys = [k for k in (reader.fieldnames or []) if k]
-            low = {k: k.strip().lower() for k in keys}
-            id_key = next((k for k in keys if low[k] in ("id", "level_id", "levelid")), None) or \
-                next((k for k in keys if "id" in low[k].split() or low[k].endswith(" id")), None)
-            tier_key = next((k for k in keys if "tier" in low[k]), None) or \
-                next((k for k in keys if "rating" in low[k] and "enjoy" not in low[k]), None)
-            
-            if id_key:
-                for row in reader:
-                    lid = to_int(row.get(id_key))
-                    t = to_float(row.get(tier_key)) if tier_key else 0.0
-                    
-                    # Fallback rule: if a top extreme demon has a missing/blank tier in the CSV,
-                    # automatically assign it tier 39.0
-                    if lid and (not t or t <= 0):
-                        t = 39.0
-
-                    if lid and t > 0:
-                        out.append((lid, t))
-    except OSError:
-        pass
-    _csv_levels = out
-    return out
-
-
-def build_avg_curve():
-    """Return [{x, y}] for tiers 0..39: average score of a level at each tier."""
-    index = get_aredl_index()
-    full = load_csv_levels()
-    if full:  # every demon on GDDL: listed ones get their rank, the rest are unranked
-        samples = [(t, index.get(lid, 0)) for lid, t in full]
-    else:     # fallback: only AREDL-listed levels we've looked up
-        samples = [(_tiers[lid], pos) for lid, pos in index.items() if pos <= AVG_MAX_LEVELS and _tiers.get(lid)]
-    buckets = {}
-    for t, pos in samples:
-        b = max(1, min(39, round(t)))
-        buckets.setdefault(b, []).append(calculate_score(10, b, pos))
-
-    known = sorted(
-        (b, math.log(max(sum(v) / len(v), 1e-9) / max(calculate_score(10, b, 0), 1e-9)))
-        for b, v in buckets.items()
-    )
-    if known and not full:
-        known.insert(0, (known[0][0] - 3, 0.0))
-
-    def ln_ratio(x):
-        if not known:
-            return 0.0
-        if x <= known[0][0]:
-            return known[0][1] if full else 0.0 if x < known[0][0] - 3 else known[0][1]
-        if x >= known[-1][0]:
-            return known[-1][1]
-        for (x1, y1), (x2, y2) in zip(known, known[1:]):
-            if x1 <= x <= x2:
-                return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
-        return 0.0
-
-    return [{"x": i / 2, "y": round(calculate_score(10, i / 2, 0) * math.exp(ln_ratio(i / 2)), 2)} for i in range(0, 79)]
 
 
 # ----------------------------------------------------------------------------
@@ -368,7 +265,7 @@ def get_level_score(level_id):
     gddl_failed = False
     aredl_rank = 0
 
-    if stars == 10:  # demons only
+    if stars == 10:
         gddl_tier = fetch_gddl_tier(level_id)
         gddl_failed = gddl_tier is None
         if gddl_failed:
@@ -417,30 +314,6 @@ def curve():
         xs = [i / 2 for i in range(0, 79)]
         pts = [{"x": x, "y": calculate_score(s, x, a)} for x in xs]
     return jsonify({"points": pts})
-
-
-@app.route("/api/avg_curve")
-def avg_curve():
-    full = load_csv_levels()
-    if full:
-        return jsonify({"points": build_avg_curve(), "done": len(full), "total": len(full), "ready": True, "source": "csv"})
-    _load_tier_cache()
-    index = get_aredl_index()
-    wanted = sorted((pos, lid) for lid, pos in index.items() if pos <= AVG_MAX_LEVELS)
-    todo = [lid for _, lid in wanted if lid not in _tiers]
-    batch = todo[:AVG_BATCH]
-    if batch:
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            for lid, t in zip(batch, ex.map(fetch_gddl_tier, batch)):
-                _tiers[lid] = t or 0.0
-        _save_tier_cache()
-    return jsonify({
-        "points": build_avg_curve(),
-        "done": len(wanted) - len(todo) + len(batch),
-        "total": len(wanted),
-        "ready": len(todo) <= len(batch),
-        "source": "aredl",
-    })
 
 
 @app.route("/")
@@ -557,8 +430,7 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
       <div class="score-title">Score vs GDDL tier <span class="meta">(log scale)</span></div>
       <div class="chartbox" id="cmpChart"></div>
       <div class="legend" id="cmpLegend" style="margin-top:8px"></div>
-      <div class="meta" id="avgStatus"></div>
-      <p class="chart-cap">The line is the average score of a level at each GDDL tier, using the AREDL-listed levels at that tier (so the list term is included); tiers with no listed levels follow the unranked score. The dots mark the two levels you're comparing.</p>
+      <p class="chart-cap">The curve shows the theoretical score trajectory across GDDL tiers (including expected AREDL list scaling above tier 20). The dots mark the levels you're comparing.</p>
     </div>
   </section>
 
@@ -791,7 +663,7 @@ function renderCompare() {
 $('cb').addEventListener('click', cmpSearch);
 $('cq').addEventListener('keydown', e => { if (e.key === 'Enter') cmpSearch(); });
 
-/* ---------- log chart: average score vs GDDL tier ---------- */
+/* ---------- log chart: pure function curve vs GDDL tier ---------- */
 const BANDS = [
   { name: 'Easy', max: 5, color: '#4cd07d' },
   { name: 'Medium', max: 10, color: '#f5d524' },
@@ -834,26 +706,29 @@ function logChart(box, pts, xLabel, marks, xTicks) {
   });
   box.replaceChildren(s);
 }
-function fallbackCurve() {
+
+// Pure mathematical curve: unranked 10* score for tiers 0..20,
+// smoothly transitioning to expected AREDL list rank scaling for tiers 20..39.
+function functionCurve() {
   const pts = [];
-  for (let i = 0; i <= 78; i++) { const x = i / 2; pts.push({ x: x, y: Math.pow(1.3, x + 9) + 1 - 2 }); }
+  for (let i = 0; i <= 78; i++) {
+    const g = i / 2;
+    const base = Math.pow(1.3, g + 9);
+    let listBonus = 1.0;
+    if (g > 20) {
+      const estRank = Math.pow(1000, (39 - g) / 19);
+      listBonus = Math.pow(10 / 9, 149 - (estRank - 1) / 7);
+    }
+    pts.push({ x: g, y: base + listBonus - 2 });
+  }
   return pts;
 }
-let avgPts = null, avgTimer = null;
+
 function drawCmpChart() {
   const marks = cmp.filter(x => x.gddl_tier > 0).map(x => ({ x: x.gddl_tier, y: x.score, label: x.name.length > 14 ? x.name.slice(0, 13) + '…' : x.name, color: x.color }));
-  logChart($('cmpChart'), avgPts || fallbackCurve(), 'GDDL tier', marks, [0, 5, 10, 15, 20, 25, 30, 35, 39]);
+  logChart($('cmpChart'), functionCurve(), 'GDDL tier', marks, [0, 5, 10, 15, 20, 25, 30, 35, 39]);
 }
-async function refreshAvg() {
-  clearTimeout(avgTimer);
-  try {
-    const d = await (await fetch('/api/avg_curve')).json();
-    avgPts = d.points;
-    $('avgStatus').textContent = d.ready ? (d.source === 'csv' ? 'Average over all ' + d.total + ' demons in your GDDL export.' : 'Average of AREDL-listed levels only.') : 'Building the average from AREDL levels… ' + d.done + '/' + d.total;
-    drawCmpChart();
-    if (!d.ready) avgTimer = setTimeout(refreshAvg, 300);
-  } catch (e) { $('avgStatus').textContent = 'Could not load the average curve; showing the unranked score instead.'; }
-}
+
 (function buildLegend() {
   let from = 1;
   BANDS.forEach(b => {
@@ -897,7 +772,7 @@ async function loadRankTable() {
 
 $('searchBtn').addEventListener('click', searchLevels);
 $('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') searchLevels(); });
-renderRecent(); renderCompare(); refreshAvg();
+renderRecent(); renderCompare();
 </script>
 </body>
 </html>
