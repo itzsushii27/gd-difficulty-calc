@@ -83,22 +83,79 @@ def fetch_level(level_id):
 
 
 # --- GDDL tier -------------------------------------------------------------
-def fetch_gddl_tier(level_id):
-    headers = {}
-    if GDDL_API_KEY:
-        headers["Authorization"] = f"Bearer {GDDL_API_KEY}"
-    data = get_json(f"{GDDL_BASE}/level/{level_id}", headers=headers)
+GDDL_SITE = os.environ.get("GDDL_SITE", "https://gdladder.com")
+
+
+def _tier_from_json(data):
     if not isinstance(data, dict):
-        return 0.0
-    # Some responses wrap the level in another object.
+        return None
     for key in ("level", "data"):
         if isinstance(data.get(key), dict):
             data = data[key]
             break
     for key in ("Rating", "rating", "Tier", "tier"):
         if data.get(key) is not None:
-            return to_float(data.get(key))
+            return to_float(data.get(key), None)
+    return None
+
+
+def _tier_from_html(html):
+    """Parse the public level page, e.g. 'Tier 5 (4.67)' or meta 'Tier 5 · Enjoyment 7.3'."""
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    m = re.search(r"Tier\s*(\d+)\s*\(\s*(\d+(?:\.\d+)?)\s*\)", text)
+    if m:
+        return float(m.group(2))  # precise value
+    m = re.search(r'content="Tier\s*(\d+(?:\.\d+)?)\s*[\u00b7|]', html)
+    if m:
+        return float(m.group(1))  # rounded fallback from the meta description
+    return None
+
+
+def gddl_candidates(level_id):
+    return [
+        ("json", f"{GDDL_BASE}/level/{level_id}"),
+        ("json", f"{GDDL_SITE}/api/level/{level_id}"),
+        ("json", f"{GDDL_SITE}/api/levels/{level_id}"),
+        ("html", f"{GDDL_SITE}/level/{level_id}"),
+    ]
+
+
+def fetch_gddl_tier(level_id, debug=None):
+    headers = {}
+    if GDDL_API_KEY:
+        headers["Authorization"] = f"Bearer {GDDL_API_KEY}"
+    for kind, url in gddl_candidates(level_id):
+        try:
+            r = http.get(url, headers=headers, timeout=TIMEOUT)
+        except requests.RequestException as e:
+            if debug is not None:
+                debug.append({"url": url, "error": str(e)})
+            continue
+        tier = None
+        if r.status_code == 200:
+            if kind == "json":
+                try:
+                    tier = _tier_from_json(r.json())
+                except ValueError:
+                    tier = None
+            else:
+                tier = _tier_from_html(r.text)
+        if debug is not None:
+            debug.append({"url": url, "status": r.status_code,
+                          "content_type": r.headers.get("content-type"),
+                          "tier": tier, "preview": r.text[:200]})
+        if tier is not None:
+            return tier
     return 0.0
+
+
+@app.route("/api/debug/gddl/<int:level_id>")
+def debug_gddl(level_id):
+    attempts = []
+    tier = fetch_gddl_tier(level_id, attempts)
+    return jsonify({"tier": tier, "attempts": attempts})
 
 
 # --- AREDL position (full list cached, indexed by in-game level id) -----------
