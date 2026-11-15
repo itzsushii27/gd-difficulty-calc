@@ -383,14 +383,14 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
     <p>One number for how hard a Geometry Dash level is, built from stars, GDDL tier and AREDL rank.</p>
   </header>
   <nav>
-    <button class="active" data-tab="calc">Calculator</button>
-    <button data-tab="cmp">Compare</button>
+    <button class="active" data-tab="cmp">Compare</button>
+    <button data-tab="calc">Calculator</button>
     <button data-tab="play">Playground</button>
     <button data-tab="how">How it works</button>
   </nav>
 
   <!-- CALCULATOR -->
-  <section id="tab-calc">
+  <section id="tab-calc" class="hidden">
     <div class="card">
       <div class="row">
         <input type="text" id="searchInput" placeholder="Search a level name or ID…" autocomplete="off">
@@ -403,7 +403,7 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
   </section>
 
   <!-- COMPARE -->
-  <section id="tab-cmp" class="hidden">
+  <section id="tab-cmp">
     <div class="card">
       <div class="score-title">Compare two levels</div>
       <p class="meta">Pick two levels to see which is harder and by how much.</p>
@@ -415,6 +415,12 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
       </div>
     </div>
     <div id="cmpResult"></div>
+    <div class="card">
+      <div class="score-title">Score vs GDDL tier <span class="meta">(log scale)</span></div>
+      <div class="chartbox" id="cmpChart"></div>
+      <div class="legend" id="cmpLegend" style="margin-top:8px"></div>
+      <p class="chart-cap">A 10★ demon with no AREDL rank. The dots mark the two levels you're comparing (listed levels sit higher because of the list term).</p>
+    </div>
   </section>
 
   <!-- PLAYGROUND -->
@@ -427,16 +433,6 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
       <div class="slider"><div class="top"><span>AREDL rank <span class="meta">(0 = unranked)</span></span><input type="number" id="pA" min="0" max="500" step="1" value="0"></div><input type="range" id="rA" min="0" max="500" step="1" value="0"></div>
       <div class="score-num" id="pScore">–</div>
       <div id="pBreak"></div>
-    </div>
-    <div class="card">
-      <div class="score-title">Score vs GDDL tier <span class="meta">(log scale)</span></div>
-      <div class="chartbox" id="pChartT"></div>
-      <p class="chart-cap">Uses your current stars and rank. Each tier multiplies the base term by 1.3, so the curve is a straight line on a log axis until the list term stops dominating.</p>
-    </div>
-    <div class="card">
-      <div class="score-title">Score vs AREDL rank <span class="meta">(log scale)</span></div>
-      <div class="chartbox" id="pChartR"></div>
-      <p class="chart-cap">Uses your current stars and tier. Rank 0 (unranked) has no point on this curve.</p>
     </div>
   </section>
 
@@ -459,9 +455,6 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
         <li><b>Tier:</b> community-voted GDDL rating (0 if the level isn't on GDDL). Only 10★ demons look it up.</li>
         <li><b>Rank:</b> current AREDL position (0 if unranked). Only 10★ demons look it up.</li>
       </ul>
-      <h3>Score by AREDL rank</h3>
-      <div class="chartbox" id="rankChart"></div>
-      <p class="chart-cap">10★, tier 10, log scale. A straight line on a log axis means exponential growth: every 7 ranks multiplies the list term by 10/9.</p>
       <h3>What the list term looks like</h3>
       <table><thead><tr><th>AREDL rank</th><th class="num">List term</th></tr></thead><tbody id="rankTable"><tr><td colspan="2" class="meta">Loading…</td></tr></tbody></table>
       <div class="actions"><button class="ghost" id="toPlay">Try it in the playground</button></div>
@@ -526,7 +519,7 @@ function renderRecent() {
 }
 function pushRecent(q) {
   const r = load('gdRecent').filter(x => x.toLowerCase() !== q.toLowerCase());
-  r.unshift(q); save('gdRecent', r.slice(0, 6)); renderRecent();
+  r.unshift(q); save('gdRecent', r.slice(0, 6)); renderRecent(); drawCmpChart();
 }
 
 /* ---------- search ---------- */
@@ -620,6 +613,7 @@ async function cmpPick(k, id) {
   } catch (e) { $('cr' + k).replaceChildren(msg('Failed to load level.', true)); }
 }
 function renderVerdict() {
+  drawCmpChart();
   const box = $('cmpResult'); box.replaceChildren();
   const a = cmp.A, b = cmp.B; if (!a || !b) return;
   const hi = a.score >= b.score ? a : b, lo = hi === a ? b : a;
@@ -650,14 +644,22 @@ $('cbA').addEventListener('click', () => cmpSearch('A'));
 $('cbB').addEventListener('click', () => cmpSearch('B'));
 ['A', 'B'].forEach(k => $('cq' + k).addEventListener('keydown', e => { if (e.key === 'Enter') cmpSearch(k); }));
 
-/* ---------- log charts ---------- */
+/* ---------- log chart: score vs GDDL tier ---------- */
+const BANDS = [
+  { name: 'Easy', max: 5, color: '#4cd07d' },
+  { name: 'Medium', max: 10, color: '#f5d524' },
+  { name: 'Hard', max: 15, color: '#f5a524' },
+  { name: 'Insane', max: 20, color: '#ff5d5d' },
+  { name: 'Extreme', max: 39, color: '#b86bff' }
+];
+function bandOf(t) { return BANDS.find(b => t <= b.max) || BANDS[BANDS.length - 1]; }
 function svgEl(tag, attrs) { const e = document.createElementNS('http://www.w3.org/2000/svg', tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
 const SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹';
 function sup(n) { return String(n).split('').map(c => c === '-' ? '⁻' : SUP[+c]).join(''); }
 function svgText(attrs, text) { const t = svgEl('text', attrs); t.textContent = text; return t; }
-function logChart(box, pts, xLabel, mark) {
-  const W = 640, H = 270, L = 62, R = 16, T = 14, B = 40;
-  const ys = pts.map(p => Math.max(p.y, 0.1));
+function logChart(box, pts, xLabel, marks, xTicks) {
+  const W = 640, H = 290, L = 62, R = 16, T = 16, B = 40;
+  const ys = pts.map(p => Math.max(p.y, 0.1)).concat(marks.map(m => Math.max(m.y, 0.1)));
   const lo = Math.floor(Math.log10(Math.min(...ys)));
   let hi = Math.ceil(Math.log10(Math.max(...ys)));
   if (hi <= lo) hi = lo + 1;
@@ -670,31 +672,49 @@ function logChart(box, pts, xLabel, mark) {
     s.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: 'var(--line)' }));
     s.appendChild(svgText({ x: L - 8, y: y + 4, 'text-anchor': 'end', fill: 'var(--muted)', 'font-size': 11 }, '10' + sup(k)));
   }
-  for (let i = 0; i <= 5; i++) {
-    const xv = x0 + (x1 - x0) * i / 5, x = px(xv);
+  xTicks.forEach(xv => {
+    const x = px(xv);
     s.appendChild(svgEl('line', { x1: x, x2: x, y1: H - B, y2: H - B + 4, stroke: 'var(--muted)' }));
-    s.appendChild(svgText({ x: x, y: H - B + 17, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 11 }, Math.round(xv * 10) / 10));
-  }
+    s.appendChild(svgText({ x: x, y: H - B + 17, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 11 }, xv));
+  });
   s.appendChild(svgText({ x: (L + W - R) / 2, y: H - 6, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 12 }, xLabel));
-  s.appendChild(svgEl('polyline', { points: pts.map(p => px(p.x).toFixed(1) + ',' + py(p.y).toFixed(1)).join(' '), fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2.5, 'stroke-linejoin': 'round' }));
-  if (mark) {
-    const cx = px(mark.x), cy = py(mark.y);
-    s.appendChild(svgEl('circle', { cx: cx, cy: cy, r: 5, fill: 'var(--accent2)' }));
-    s.appendChild(svgText({ x: cx + (cx > W - 130 ? -10 : 10), y: cy - 8, 'text-anchor': cx > W - 130 ? 'end' : 'start', fill: 'var(--text)', 'font-size': 12, 'font-weight': 700 }, fmt(mark.y)));
-  }
+  // line, color-coded by difficulty band
+  let prev = null, seg = [], col = null;
+  const flush = () => { if (seg.length > 1) s.appendChild(svgEl('polyline', { points: seg.join(' '), fill: 'none', stroke: col, 'stroke-width': 3.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' })); };
+  pts.forEach(p => {
+    const pt = px(p.x).toFixed(1) + ',' + py(p.y).toFixed(1), c = bandOf(p.x).color;
+    if (prev) { if (c !== col) { flush(); seg = [prev]; col = c; } seg.push(pt); }
+    prev = pt;
+  });
+  flush();
+  marks.forEach((m, i) => {
+    const cx = px(m.x), cy = py(m.y), right = cx > W - 140;
+    s.appendChild(svgEl('circle', { cx: cx, cy: cy, r: 6, fill: m.color, stroke: '#0f1115', 'stroke-width': 2 }));
+    s.appendChild(svgText({ x: cx + (right ? -10 : 10), y: cy + (i ? 18 : -9), 'text-anchor': right ? 'end' : 'start', fill: m.color, 'font-size': 12, 'font-weight': 700 }, m.label + ': ' + fmt(m.y)));
+  });
   box.replaceChildren(s);
 }
 async function curve(mode, s, g, a) {
   const d = await (await fetch('/api/curve?mode=' + mode + '&s=' + s + '&g=' + g + '&a=' + a)).json();
   return d.points;
 }
-async function drawPlayCharts(score) {
-  const s = $('pS').value, g = $('pG').value, a = $('pA').value;
+let cmpCurve = null;
+async function drawCmpChart() {
   try {
-    logChart($('pChartT'), await curve('tier', s, g, a), 'GDDL tier', { x: +g, y: score });
-    logChart($('pChartR'), await curve('rank', s, g, a), 'AREDL rank', +a > 0 ? { x: +a, y: score } : null);
+    if (!cmpCurve) cmpCurve = await curve('tier', 10, 0, 0);
+    const marks = [];
+    if (cmp.A) marks.push({ x: cmp.A.gddl_tier, y: cmp.A.score, label: 'A', color: '#ffffff' });
+    if (cmp.B) marks.push({ x: cmp.B.gddl_tier, y: cmp.B.score, label: 'B', color: '#7cc7ff' });
+    logChart($('cmpChart'), cmpCurve, 'GDDL tier', marks, [0, 5, 10, 15, 20, 25, 30, 35, 39]);
   } catch (e) {}
 }
+(function buildLegend() {
+  let from = 1;
+  BANDS.forEach(b => {
+    $('cmpLegend').appendChild(el('span', null, [el('span', { class: 'dot', style: 'background:' + b.color }), b.name + ' (' + from + '–' + b.max + ')']));
+    from = b.max + 1;
+  });
+})();
 
 /* ---------- playground ---------- */
 const pairs = [['pS', 'rS'], ['pG', 'rG'], ['pA', 'rA']];
@@ -708,7 +728,6 @@ function runPlay() {
       const d = await (await fetch('/api/calc?' + q)).json();
       $('pScore').textContent = fmt(d.score);
       $('pBreak').replaceChildren(breakdown(d.base, d.list_bonus));
-      drawPlayCharts(d.score);
     } catch (e) { $('pScore').textContent = '–'; }
   }, 100);
 }
@@ -721,7 +740,6 @@ pairs.forEach(([n, r]) => {
 let rankLoaded = false;
 async function loadRankTable() {
   if (rankLoaded) return;
-  try { logChart($('rankChart'), await curve('rank', 10, 10, 0), 'AREDL rank', null); } catch (e) {}
   const ranks = [1, 5, 10, 25, 50, 100, 150, 200, 300];
   try {
     const res = await Promise.all(ranks.map(r => fetch('/api/calc?s=1&g=0&a=' + r).then(x => x.json())));
