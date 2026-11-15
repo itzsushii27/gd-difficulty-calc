@@ -1,7 +1,10 @@
 import os
+import json
+import math
 import re
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from flask import Flask, request, jsonify, render_template_string
@@ -200,6 +203,73 @@ def fetch_aredl_rank(level_id):
     return get_aredl_index().get(level_id, 0)
 
 
+# --- Average score per GDDL tier ------------------------------------------------
+# For every AREDL-listed level we look up its GDDL tier (cached), score it with
+# calculate_score(10, tier, rank), and average the scores per tier. The curve is
+# then anchored to those averages (see build_avg_curve) so it exists at every tier.
+TIER_CACHE_FILE = os.environ.get("TIER_CACHE_FILE", "gddl_tier_cache.json")
+AVG_MAX_LEVELS = int(os.environ.get("AVG_MAX_LEVELS", "400"))  # top N AREDL levels used
+AVG_BATCH = 40  # levels looked up per /api/avg_curve call (works on serverless too)
+_tiers = {}
+_tiers_loaded = False
+
+
+def _load_tier_cache():
+    global _tiers_loaded
+    if _tiers_loaded:
+        return
+    _tiers_loaded = True
+    try:
+        with open(TIER_CACHE_FILE) as f:
+            _tiers.update({int(k): float(v) for k, v in json.load(f).items()})
+    except (OSError, ValueError):
+        pass
+
+
+def _save_tier_cache():
+    try:
+        with open(TIER_CACHE_FILE, "w") as f:
+            json.dump({k: v for k, v in _tiers.items() if v > 0}, f)
+    except OSError:
+        pass
+
+
+def build_avg_curve():
+    """Return [{x, y}] for tiers 0..39. Always returns a full curve."""
+    index = get_aredl_index()
+    buckets = {}
+    for lid, pos in index.items():
+        t = _tiers.get(lid)
+        if pos <= AVG_MAX_LEVELS and t:
+            buckets.setdefault(round(t), []).append(calculate_score(10, t, pos))
+
+    # log-ratio of (average score) / (unranked score) at each tier that has data
+    known = sorted(
+        (b, math.log(max(sum(v) / len(v), 1e-9) / max(calculate_score(10, b, 0), 1e-9)))
+        for b, v in buckets.items()
+    )
+    if known:  # below the lowest listed tier, levels are unranked -> ratio fades to 1
+        known.insert(0, (known[0][0] - 3, 0.0))
+
+    def ln_ratio(x):
+        if not known:
+            return 0.0
+        if x <= known[0][0]:
+            return known[0][1]
+        if x >= known[-1][0]:
+            return known[-1][1]
+        for (x1, y1), (x2, y2) in zip(known, known[1:]):
+            if x1 <= x <= x2:
+                return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+        return 0.0
+
+    pts = []
+    for i in range(0, 79):
+        x = i / 2
+        pts.append({"x": x, "y": round(calculate_score(10, x, 0) * math.exp(ln_ratio(x)), 2)})
+    return pts
+
+
 # ----------------------------------------------------------------------------
 # Routes
 # ----------------------------------------------------------------------------
@@ -299,6 +369,26 @@ def curve():
         xs = [i / 2 for i in range(0, 79)]
         pts = [{"x": x, "y": calculate_score(s, x, a)} for x in xs]
     return jsonify({"points": pts})
+
+
+@app.route("/api/avg_curve")
+def avg_curve():
+    _load_tier_cache()
+    index = get_aredl_index()
+    wanted = sorted((pos, lid) for lid, pos in index.items() if pos <= AVG_MAX_LEVELS)
+    todo = [lid for _, lid in wanted if lid not in _tiers]
+    batch = todo[:AVG_BATCH]
+    if batch:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for lid, t in zip(batch, ex.map(fetch_gddl_tier, batch)):
+                _tiers[lid] = t
+        _save_tier_cache()
+    return jsonify({
+        "points": build_avg_curve(),
+        "done": len(wanted) - len(todo) + len(batch),
+        "total": len(wanted),
+        "ready": len(todo) <= len(batch),
+    })
 
 
 @app.route("/")
@@ -419,7 +509,8 @@ h3 { margin:22px 0 6px; font-size:1.05rem; } p { margin:6px 0; } li { margin:4px
       <div class="score-title">Score vs GDDL tier <span class="meta">(log scale)</span></div>
       <div class="chartbox" id="cmpChart"></div>
       <div class="legend" id="cmpLegend" style="margin-top:8px"></div>
-      <p class="chart-cap">A 10★ demon with no AREDL rank. The dots mark the two levels you're comparing (listed levels sit higher because of the list term).</p>
+      <div class="meta" id="avgStatus"></div>
+      <p class="chart-cap">The line is the average score of a level at each GDDL tier, using the AREDL-listed levels at that tier (so the list term is included); tiers with no listed levels follow the unranked score. The dots mark the two levels you're comparing.</p>
     </div>
   </section>
 
@@ -519,7 +610,7 @@ function renderRecent() {
 }
 function pushRecent(q) {
   const r = load('gdRecent').filter(x => x.toLowerCase() !== q.toLowerCase());
-  r.unshift(q); save('gdRecent', r.slice(0, 6)); renderRecent(); drawCmpChart();
+  r.unshift(q); save('gdRecent', r.slice(0, 6)); renderRecent(); drawCmpChart(); refreshAvg();
 }
 
 /* ---------- search ---------- */
@@ -644,7 +735,7 @@ $('cbA').addEventListener('click', () => cmpSearch('A'));
 $('cbB').addEventListener('click', () => cmpSearch('B'));
 ['A', 'B'].forEach(k => $('cq' + k).addEventListener('keydown', e => { if (e.key === 'Enter') cmpSearch(k); }));
 
-/* ---------- log chart: score vs GDDL tier ---------- */
+/* ---------- log chart: average score vs GDDL tier ---------- */
 const BANDS = [
   { name: 'Easy', max: 5, color: '#4cd07d' },
   { name: 'Medium', max: 10, color: '#f5d524' },
@@ -652,25 +743,27 @@ const BANDS = [
   { name: 'Insane', max: 20, color: '#ff5d5d' },
   { name: 'Extreme', max: 39, color: '#b86bff' }
 ];
-function bandOf(t) { return BANDS.find(b => t <= b.max) || BANDS[BANDS.length - 1]; }
 function svgEl(tag, attrs) { const e = document.createElementNS('http://www.w3.org/2000/svg', tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
-const SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹';
-function sup(n) { return String(n).split('').map(c => c === '-' ? '⁻' : SUP[+c]).join(''); }
 function svgText(attrs, text) { const t = svgEl('text', attrs); t.textContent = text; return t; }
+const Y_LABELS = ['1', '10', '100', '1000', '10K', '100K', '1M', '10M'];
 function logChart(box, pts, xLabel, marks, xTicks) {
-  const W = 640, H = 290, L = 62, R = 16, T = 16, B = 40;
-  const ys = pts.map(p => Math.max(p.y, 0.1)).concat(marks.map(m => Math.max(m.y, 0.1)));
-  const lo = Math.floor(Math.log10(Math.min(...ys)));
-  let hi = Math.ceil(Math.log10(Math.max(...ys)));
-  if (hi <= lo) hi = lo + 1;
+  const W = 640, H = 300, L = 54, R = 16, T = 16, B = 40, LO = 0, HI = 7;
   const x0 = pts[0].x, x1 = pts[pts.length - 1].x;
   const px = x => L + (x - x0) / ((x1 - x0) || 1) * (W - L - R);
-  const py = y => T + (1 - (Math.log10(Math.max(y, 0.1)) - lo) / (hi - lo)) * (H - T - B);
+  const py = y => T + (1 - (Math.log10(Math.min(Math.max(y, 1), 1e7)) - LO) / (HI - LO)) * (H - T - B);
   const s = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img' });
-  for (let k = lo; k <= hi; k++) {
+  // gradient along x, easy -> extreme
+  const defs = svgEl('defs', {}), grad = svgEl('linearGradient', { id: 'tierGrad', gradientUnits: 'userSpaceOnUse', x1: px(x0), x2: px(x1), y1: 0, y2: 0 });
+  const stop = (o, c) => grad.appendChild(svgEl('stop', { offset: Math.min(Math.max(o, 0), 1), 'stop-color': c }));
+  stop(0, BANDS[0].color);
+  let from = 1;
+  BANDS.forEach(b => { stop(((from + b.max) / 2 - x0) / (x1 - x0), b.color); from = b.max + 1; });
+  stop(1, BANDS[BANDS.length - 1].color);
+  defs.appendChild(grad); s.appendChild(defs);
+  for (let k = LO; k <= HI; k++) {
     const y = py(Math.pow(10, k));
     s.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: 'var(--line)' }));
-    s.appendChild(svgText({ x: L - 8, y: y + 4, 'text-anchor': 'end', fill: 'var(--muted)', 'font-size': 11 }, '10' + sup(k)));
+    s.appendChild(svgText({ x: L - 8, y: y + 4, 'text-anchor': 'end', fill: 'var(--muted)', 'font-size': 11 }, Y_LABELS[k]));
   }
   xTicks.forEach(xv => {
     const x = px(xv);
@@ -678,35 +771,37 @@ function logChart(box, pts, xLabel, marks, xTicks) {
     s.appendChild(svgText({ x: x, y: H - B + 17, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 11 }, xv));
   });
   s.appendChild(svgText({ x: (L + W - R) / 2, y: H - 6, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': 12 }, xLabel));
-  // line, color-coded by difficulty band
-  let prev = null, seg = [], col = null;
-  const flush = () => { if (seg.length > 1) s.appendChild(svgEl('polyline', { points: seg.join(' '), fill: 'none', stroke: col, 'stroke-width': 3.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' })); };
-  pts.forEach(p => {
-    const pt = px(p.x).toFixed(1) + ',' + py(p.y).toFixed(1), c = bandOf(p.x).color;
-    if (prev) { if (c !== col) { flush(); seg = [prev]; col = c; } seg.push(pt); }
-    prev = pt;
-  });
-  flush();
+  s.appendChild(svgEl('polyline', { points: pts.map(p => px(p.x).toFixed(1) + ',' + py(p.y).toFixed(1)).join(' '), fill: 'none', stroke: 'url(#tierGrad)', 'stroke-width': 1.75, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
   marks.forEach((m, i) => {
     const cx = px(m.x), cy = py(m.y), right = cx > W - 140;
-    s.appendChild(svgEl('circle', { cx: cx, cy: cy, r: 6, fill: m.color, stroke: '#0f1115', 'stroke-width': 2 }));
+    s.appendChild(svgEl('circle', { cx: cx, cy: cy, r: 5, fill: m.color, stroke: '#0f1115', 'stroke-width': 2 }));
     s.appendChild(svgText({ x: cx + (right ? -10 : 10), y: cy + (i ? 18 : -9), 'text-anchor': right ? 'end' : 'start', fill: m.color, 'font-size': 12, 'font-weight': 700 }, m.label + ': ' + fmt(m.y)));
   });
   box.replaceChildren(s);
 }
-async function curve(mode, s, g, a) {
-  const d = await (await fetch('/api/curve?mode=' + mode + '&s=' + s + '&g=' + g + '&a=' + a)).json();
-  return d.points;
+// Shown until the server's average curve arrives, so the line is always there:
+// the plain formula for an unranked 10★ level (same as calculate_score(10, tier, 0)).
+function fallbackCurve() {
+  const pts = [];
+  for (let i = 0; i <= 78; i++) { const x = i / 2; pts.push({ x: x, y: Math.pow(1.3, x + 9) + 1 - 2 }); }
+  return pts;
 }
-let cmpCurve = null;
-async function drawCmpChart() {
+let avgPts = null, avgTimer = null;
+function drawCmpChart() {
+  const marks = [];
+  if (cmp.A) marks.push({ x: cmp.A.gddl_tier, y: cmp.A.score, label: 'A', color: '#ffffff' });
+  if (cmp.B) marks.push({ x: cmp.B.gddl_tier, y: cmp.B.score, label: 'B', color: '#7cc7ff' });
+  logChart($('cmpChart'), avgPts || fallbackCurve(), 'GDDL tier', marks, [0, 5, 10, 15, 20, 25, 30, 35, 39]);
+}
+async function refreshAvg() {
+  clearTimeout(avgTimer);
   try {
-    if (!cmpCurve) cmpCurve = await curve('tier', 10, 0, 0);
-    const marks = [];
-    if (cmp.A) marks.push({ x: cmp.A.gddl_tier, y: cmp.A.score, label: 'A', color: '#ffffff' });
-    if (cmp.B) marks.push({ x: cmp.B.gddl_tier, y: cmp.B.score, label: 'B', color: '#7cc7ff' });
-    logChart($('cmpChart'), cmpCurve, 'GDDL tier', marks, [0, 5, 10, 15, 20, 25, 30, 35, 39]);
-  } catch (e) {}
+    const d = await (await fetch('/api/avg_curve')).json();
+    avgPts = d.points;
+    $('avgStatus').textContent = d.ready ? '' : 'Building the average from AREDL levels… ' + d.done + '/' + d.total;
+    drawCmpChart();
+    if (!d.ready) avgTimer = setTimeout(refreshAvg, 300);
+  } catch (e) { $('avgStatus').textContent = 'Could not load the average curve; showing the unranked score instead.'; }
 }
 (function buildLegend() {
   let from = 1;
